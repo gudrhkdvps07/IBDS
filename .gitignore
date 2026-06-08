@@ -1,0 +1,23 @@
+# Environment files
+.env
+*.env
+.venv
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Data / result files
+log/
+
+# JSON , log files
+*.json
+*.log
+
+# 테스트용
+z_checkset/
+CLAUDE.md
+results/
+
+# Debug logs
+debug-*.log
