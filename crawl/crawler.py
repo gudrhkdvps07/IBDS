@@ -13,7 +13,7 @@ import requests
 from bs4 import BeautifulSoup  # type: ignore[reportMissingModuleSource]
 from dotenv import load_dotenv
 
-from crawl.auth import LOGIN_URL, ensure_login_url, login as _do_login
+from authentication.auth import LOGIN_URL, ensure_login_url, login as _do_login
 from proxy.proxy_config import apply_proxy
 
 load_dotenv()
@@ -208,23 +208,17 @@ class Crawler:
 
     # 로그인 → 시드 URL 큐 적재 → BFS 크롤링 수행
     def crawl(self, extra_seeds: list[str] | None = None, progress_callback=None) -> list[PageResult]:
-        if self.init_cookies is not None:
+        if self.init_cookies:
             self.session.cookies.update(self.init_cookies)
             self.auth_cookies = dict(self.init_cookies)
-        elif os.getenv("DEMO_DVWA_AUTH", "0") == "1":
-            phpsessid = os.getenv("DEMO_DVWA_PHPSESSID", "")
-            if phpsessid:
-                demo_cookies = {"PHPSESSID": phpsessid, "security": "low"}
-                self.session.cookies.update(demo_cookies)
-                self.auth_cookies = demo_cookies
-                print("[CRAWLER] DEMO_DVWA_AUTH: preset PHPSESSID 적용, 로그인 생략")
-            else:
-                print("[WARN] DEMO_DVWA_AUTH=1 이지만 DEMO_DVWA_PHPSESSID가 비어 있음", file=sys.stderr)
+            print(f"[AUTH] using provided cookies: {list(self.init_cookies.keys())}")
         else:
             login_url = os.getenv("LOGIN_URL", LOGIN_URL) or ensure_login_url(self.base_url)
             if login_url:
                 if not self.login(login_url):
                     print("[WARN] login failed; continuing anonymously", file=sys.stderr)
+            else:
+                print("[AUTH] no login URL found; continuing anonymously")
 
         self.queue.append(self._normalize(self.base_url + "/"))
         for seed in (extra_seeds or []):
@@ -314,13 +308,11 @@ class Crawler:
         queries = sum(1 for page in self.results if page.query_params)
         print(f"[CRAWLER] pages={len(self.results)}, forms={forms}, query_pages={queries}")
 
-'''
 if __name__ == "__main__":
     crawler = Crawler(BASE_URL)
     crawler.crawl()
     crawler.save(OUTPUT_FILE)
     crawler.summary()
-'''
 if __name__ == "__main__":
     crawler = Crawler(BASE_URL)
     crawler.crawl(extra_seeds=[

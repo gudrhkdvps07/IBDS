@@ -16,7 +16,7 @@ STATIC_EXTENSIONS = (
     ".map", ".webp", ".bmp", ".pdf", ".zip",
 )
 
-OUTPUT_FILE = os.getenv("CAPTURE_OUTPUT", "captured_requests.jsonl")
+OUTPUT_FILE = os.getenv("CAPTURE_OUTPUT", "results/captured_requests.jsonl")
 
 # TARGET_URL 환경변수에서 (hostname, port) 추출
 def _target_host_port() -> tuple[str, int | None]:

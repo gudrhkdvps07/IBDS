@@ -58,6 +58,16 @@ def _demo_dvwa_role_sessions(roles: tuple[str, ...] | None = None) -> dict[str, 
     return role_sessions
 
 
+def get_demo_dvwa_cookies() -> dict:
+    """DEMO_DVWA_AUTH=1이고 PHPSESSID가 있으면 DVWA용 쿠키 반환, 아니면 빈 dict 반환."""
+    if os.getenv("DEMO_DVWA_AUTH", "0") != "1":
+        return {}
+    phpsessid = os.getenv("DEMO_DVWA_PHPSESSID", "").strip()
+    if not phpsessid:
+        print("[DEMO - WARN] DEMO_DVWA_AUTH=1 이지만 DEMO_DVWA_PHPSESSID가 비어 있음", file=sys.stderr)
+        return {}
+    return {"PHPSESSID": phpsessid, "security": "low"}
+
 
 # 인증상태 탐지용 힌트
 AUTH_TEXT_HINTS = (
