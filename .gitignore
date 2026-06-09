@@ -12,12 +12,14 @@ log/
 
 # JSON , log files
 *.json
+*.jsonl
 *.log
 
 # 테스트용
 z_checkset/
 CLAUDE.md
 results/
+
 
 # Debug logs
 debug-*.log
