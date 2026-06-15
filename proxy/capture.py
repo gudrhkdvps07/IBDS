@@ -2,10 +2,11 @@
 크롤러 HTTP 요청을 captured_requests.jsonl에 저장
 
 실행:
-    mitmdump -s capture.py -p 8081
+    mitmdump -s proxy/capture.py -p 8081
 """
 import json
 import os
+from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 
 from mitmproxy import http
@@ -16,7 +17,9 @@ STATIC_EXTENSIONS = (
     ".map", ".webp", ".bmp", ".pdf", ".zip",
 )
 
-OUTPUT_FILE = os.getenv("CAPTURE_OUTPUT", "results/captured_requests.jsonl")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_RUN_ID_FILE = os.path.join(_PROJECT_ROOT, "results", ".run_id")
+_FALLBACK_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # TARGET_URL 환경변수에서 (hostname, port) 추출
 def _target_host_port() -> tuple[str, int | None]:
@@ -54,7 +57,25 @@ def _params_as_list(qs: str) -> list[dict[str, str]]:
 class CaptureAddon:
     def __init__(self) -> None:
         self._host, self._port = _target_host_port()
-        print(f"[capture] target={self._host}:{self._port}  output={OUTPUT_FILE}")
+        self._run_id: str = ""
+        self._output_file: str = ""
+        print(f"[capture] target={self._host}:{self._port}")
+
+    def _resolve_output_file(self) -> str:
+        try:
+            with open(_RUN_ID_FILE) as f:
+                run_id = f.read().strip()
+        except FileNotFoundError:
+            run_id = _FALLBACK_TS
+
+        if run_id != self._run_id:
+            self._run_id = run_id
+            run_dir = os.path.join(_PROJECT_ROOT, "results", f"run_{run_id}")
+            self._output_file = os.path.join(run_dir, "captured_requests.jsonl")
+            os.makedirs(run_dir, exist_ok=True)
+            print(f"[capture] new session → {self._output_file}")
+
+        return self._output_file
 
     def _in_scope(self, req: http.Request) -> bool:
         if not self._host:
@@ -99,7 +120,8 @@ class CaptureAddon:
             "headers": dict(req.headers),
         }
 
-        with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+        output_file = self._resolve_output_file()
+        with open(output_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         print(f"[capture] {req.method} {req.pretty_url}  params={len(parameters)}")

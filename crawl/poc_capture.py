@@ -16,16 +16,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from crawl.crawler import Crawler, BASE_URL, OUTPUT_FILE
+from crawl.crawler import Crawler, BASE_URL, OUTPUT_FILE, _RUN_TS
 from authentication.auth import get_demo_dvwa_cookies
 
 if __name__ == "__main__":
+    # 프록시에 새 크롤 세션 시작을 알림
+    _results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results")
+    os.makedirs(_results_dir, exist_ok=True)
+    with open(os.path.join(_results_dir, ".run_id"), "w") as f:
+        f.write(_RUN_TS)
+
     init_cookies = get_demo_dvwa_cookies() or None
 
     crawler = Crawler(BASE_URL, init_cookies=init_cookies)
-    crawler.crawl(extra_seeds=[
-        f"{BASE_URL}/vulnerabilities/sqli/?id=1&Submit=Submit",
-        f"{BASE_URL}/vulnerabilities/xss_r/?name=test",
-    ])
+    crawler.crawl()
     crawler.save(OUTPUT_FILE)
     crawler.summary()

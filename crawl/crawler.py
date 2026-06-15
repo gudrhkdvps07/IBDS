@@ -6,8 +6,9 @@ import sys
 import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Optional
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup  # type: ignore[reportMissingModuleSource]
@@ -20,7 +21,8 @@ load_dotenv()
 
 # 대상 URL 및 결과 저장 경로
 BASE_URL = os.getenv("TARGET_URL", "http://localhost:8080")
-OUTPUT_FILE = os.getenv("OUTPUT_FILE", "results/crawl_result.json")
+_RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+OUTPUT_FILE = os.getenv("OUTPUT_FILE", f"results/run_{_RUN_TS}/crawl_result.json")
 
 
 # 크롤링에서 제외할 URL 패턴 (로그아웃, 정적 파일 등)
@@ -257,6 +259,30 @@ class Crawler:
                     result.forms.append(asdict(form))
                     self.seen_input_structures.add(self._form_signature(form))
 
+                    if form.method == "POST" and "multipart/form-data" not in form.enctype:
+                        try:
+                            payload = {f.name: f.value for f in form.fields if f.name}
+                            self.session.post(form.action, data=payload, timeout=CrawlConfig.TIMEOUT)
+                        except requests.RequestException:
+                            pass
+                    elif form.method == "GET":
+                        payload = {f.name: f.value for f in form.fields if f.name}
+                        if payload:
+                            try:
+                                parsed_action = urlparse(form.action)
+                                clean_action = urlunparse(parsed_action._replace(query="", fragment=""))
+                                submitted = self.session.get(
+                                    clean_action,
+                                    params=payload,
+                                    timeout=CrawlConfig.TIMEOUT,
+                                    allow_redirects=True,
+                                )
+                                norm = self._normalize(submitted.url)
+                                if norm not in self.visited:
+                                    self.queue.append(norm)
+                            except requests.RequestException:
+                                pass
+
                 for a in soup.find_all("a", href=True):
                     link = self._normalize(urljoin(url, a["href"]))
                     if self._is_in_scope(link) and not self._is_excluded(link):
@@ -311,13 +337,5 @@ class Crawler:
 if __name__ == "__main__":
     crawler = Crawler(BASE_URL)
     crawler.crawl()
-    crawler.save(OUTPUT_FILE)
-    crawler.summary()
-if __name__ == "__main__":
-    crawler = Crawler(BASE_URL)
-    crawler.crawl(extra_seeds=[
-        "http://localhost:8080/vulnerabilities/sqli/?id=1&Submit=Submit",
-        "http://localhost:8080/vulnerabilities/xss_r/?name=test",
-    ])
     crawler.save(OUTPUT_FILE)
     crawler.summary()
