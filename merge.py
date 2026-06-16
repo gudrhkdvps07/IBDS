@@ -1,5 +1,6 @@
 """
 크롤링결과와 프록시 결과 합치는 모듈
+예전코드라 지금 쓰면 안됨.
 """
 import argparse
 import json
@@ -7,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from utilities import load_json, save_json
+from utilities.file_utils import load_json, save_json
 
 STATIC_EXT = re.compile(
     r"\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|pdf|zip|map)(\?|#|$)",

@@ -336,7 +336,7 @@ class Crawler:
 
 if __name__ == "__main__":
     import os as _os
-    from utilities import load_json as _load_json
+    from utilities.file_utils import load_json as _load_json
     from authentication.auth import get_auth_cookies as _get_auth_cookies
 
     _config = _load_json(
