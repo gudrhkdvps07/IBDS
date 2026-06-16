@@ -1,0 +1,25 @@
+이중에서 원하는걸로 쓰면 되는데 dvwa의 경우 세션방식 권장
+인증 없이 쓰려면 auth 블록 자체를 빼거나 type을 비워두면 됨.
+
+// 세션방식
+{
+    "target_url": "타겟링크",
+    "auth": {
+        "type": "session",
+        "cookies": { // 나온 쿠키값 다 적기
+            "PHPSESSID": "세션아이디",
+            "security": "low"
+        }
+    }
+}
+
+
+// login 방식
+{
+    "target_url": "타겟링크",
+    "auth": {
+        "type": "login",
+        "username": "admin",
+        "password": "password"
+    }
+}

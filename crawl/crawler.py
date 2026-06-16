@@ -335,7 +335,17 @@ class Crawler:
         print(f"[CRAWLER] pages={len(self.results)}, forms={forms}, query_pages={queries}")
 
 if __name__ == "__main__":
-    crawler = Crawler(BASE_URL)
+    import os as _os
+    from utilities import load_json as _load_json
+    from authentication.auth import get_auth_cookies as _get_auth_cookies
+
+    _config = _load_json(
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "target_config.json"), {}
+    )
+    _base_url = _config.get("target_url", BASE_URL)
+    _init_cookies = _get_auth_cookies(_config.get("auth", {}), base_url=_base_url) or None
+
+    crawler = Crawler(_base_url, init_cookies=_init_cookies)
     crawler.crawl()
     crawler.save(OUTPUT_FILE)
     crawler.summary()

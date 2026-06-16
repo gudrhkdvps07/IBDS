@@ -1,7 +1,7 @@
 import os
 import urllib3
-
 import requests
+
 
 # PROXY_URL 환경변수가 설정된 경우 session에 mitmproxy 프록시를 적용
 def apply_proxy(session: requests.Session) -> None:

@@ -1,15 +1,9 @@
-"""
-크롤러 HTTP 요청을 captured_requests.jsonl에 저장
-
-실행:
-    mitmdump -s proxy/capture.py -p 8081
-"""
-import json
+import json 
 import os
 from datetime import datetime
 from urllib.parse import parse_qs, urlparse
-
 from mitmproxy import http
+
 
 STATIC_EXTENSIONS = (
     ".css", ".js", ".png", ".jpg", ".jpeg", ".gif",
@@ -20,6 +14,7 @@ STATIC_EXTENSIONS = (
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _RUN_ID_FILE = os.path.join(_PROJECT_ROOT, "results", ".run_id")
 _FALLBACK_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+
 
 # TARGET_URL 환경변수에서 (hostname, port) 추출
 def _target_host_port() -> tuple[str, int | None]:

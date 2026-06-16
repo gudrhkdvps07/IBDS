@@ -1,72 +1,20 @@
 # auth.py
 import sys
-import json
 import os
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
-from utilities import load_json
-from typing import Callable
 
 
 # =====
-# 로그인 설정 (app.py의 _apply_active_target_env에서 세팅됨)
+# 로그인 설정
 # =====
-LOGIN_URL          = ""
+LOGIN_URL          = ""   # 타겟 로그인 URL
 LOGIN_METHOD       = "POST"
-LOGIN_ID_1         = ""
-LOGIN_PASSWORD_1   = ""
-LOGIN_FAIL_INDICATOR = ""
+LOGIN_FAIL_INDICATOR = "" # 로그인 실패를 나타내는 지시자
 _TIMEOUT = 10
-
-
-# =====
-# DEMO ONLY - DVWA 발표 시연용 고정 세션
-# =====
-DEMO_DVWA_AUTH = os.getenv("DEMO_DVWA_AUTH", "0") == "1"
-DEMO_DVWA_PHPSESSID = os.getenv("DEMO_DVWA_PHPSESSID", "")
-
-def _demo_dvwa_role_sessions(roles: tuple[str, ...] | None = None) -> dict[str, dict]:
-    """
-    DEMO ONLY:
-    DVWA 발표 시연용 인증 우회.
-    브라우저에서 로그인 후 발급받은 PHPSESSID를 사용해 로그인 자동화를 건너뛴다.
-    실제 운영에서는 login() 자동화 또는 사용자 입력 쿠키 방식으로 대체해야 한다.
-    """
-    requested_roles = roles or ("guest", "member1")
-
-    if not DEMO_DVWA_PHPSESSID:
-        print("[DEMO - FAIL] DEMO_DVWA_AUTH=1 이지만 DEMO_DVWA_PHPSESSID가 비어 있음", file=sys.stderr)
-        return {"guest": {}}
-
-    demo_cookie = {
-        "security": "low",
-        "PHPSESSID": DEMO_DVWA_PHPSESSID,
-    }
-
-    role_sessions: dict[str, dict] = {}
-
-    if "guest" in requested_roles:
-        role_sessions["guest"] = {}
-
-    if "member1" in requested_roles:
-        role_sessions["member1"] = demo_cookie
-
-    print("[DEMO] DVWA auth bypass enabled: using preset session cookie")
-    return role_sessions
-
-
-def get_demo_dvwa_cookies() -> dict:
-    """DEMO_DVWA_AUTH=1이고 PHPSESSID가 있으면 DVWA용 쿠키 반환, 아니면 빈 dict 반환."""
-    if os.getenv("DEMO_DVWA_AUTH", "0") != "1":
-        return {}
-    phpsessid = os.getenv("DEMO_DVWA_PHPSESSID", "").strip()
-    if not phpsessid:
-        print("[DEMO - WARN] DEMO_DVWA_AUTH=1 이지만 DEMO_DVWA_PHPSESSID가 비어 있음", file=sys.stderr)
-        return {}
-    return {"PHPSESSID": phpsessid, "security": "low"}
 
 
 # 인증상태 탐지용 힌트
@@ -383,8 +331,8 @@ def login(
     session: requests.Session,
     url: str = LOGIN_URL,
     method: str = LOGIN_METHOD,
-    login_id: str = LOGIN_ID_1,
-    login_password: str = LOGIN_PASSWORD_1,
+    login_id: str = "",
+    login_password: str = "",
     fail_indicator: str = LOGIN_FAIL_INDICATOR,
     base_url: str = "",
     timeout: int = _TIMEOUT,
@@ -464,65 +412,44 @@ def login(
     return False, {}
 
 
-# 역할별 세션 쿠키 반환 (새로 로그인해 쿠키 획득)
-def make_login(
-    url: str = LOGIN_URL,
-    method: str = LOGIN_METHOD,
-    fail_indicator: str = LOGIN_FAIL_INDICATOR,
+# target_config 읽어서 인증 쿠키 반환
+def get_auth_cookies(
+    auth_cfg: dict,
     base_url: str = "",
     timeout: int = _TIMEOUT,
-    roles: tuple[str, ...] | None = None,
-) -> dict[str, dict]:
+) -> dict:
+    auth_type = auth_cfg.get("type", "")
 
-    if DEMO_DVWA_AUTH:  # 데모용
-        return _demo_dvwa_role_sessions(roles)
-    
-    requested_roles = roles or ("guest", "member1")
-    role_sessions: dict[str, dict] = {}
+    if auth_type == "session":
+        cookies = auth_cfg.get("cookies", {})
+        print(f"[AUTH] session cookies loaded: {list(cookies.keys())}")
+        return cookies
 
-    if "guest" in requested_roles:
-        role_sessions["guest"] = {}
-
-    url = url or ensure_login_url(base_url, timeout=timeout)
-    if not url:
-        print("[AUTH - FAIL] login URL이 설정되지 않았고, 자동검색에 실패함", file=sys.stderr)
-        return role_sessions
-
-    common = dict(
-        url=url,
-        method=method,
-        fail_indicator=fail_indicator,
-        base_url=base_url,
-        timeout=timeout,
-    )
-
-    if "member1" in requested_roles and LOGIN_ID_1:
+    if auth_type == "login":
+        login_url = auth_cfg.get("login_url", "") or ensure_login_url(base_url, timeout=timeout)
+        if not login_url:
+            print("[AUTH - FAIL] login URL을 찾을 수 없음", file=sys.stderr)
+            return {}
+        username = auth_cfg.get("username", "")
+        password = auth_cfg.get("password", "")
+        fail_indicator = auth_cfg.get("fail_indicator", "")
         session = _make_session()
-        ok, cookies = login(session, login_id=LOGIN_ID_1, login_password=LOGIN_PASSWORD_1, **common)
+        ok, cookies = login(
+            session,
+            url=login_url,
+            login_id=username,
+            login_password=password,
+            fail_indicator=fail_indicator,
+            base_url=base_url,
+            timeout=timeout,
+        )
         if ok:
-            role_sessions["member1"] = cookies
-            print(f"[AUTH - OK] member1 login 성공: {len(cookies)} cookies")
-        else:
-            print("[AUTH - FAIL] member1 login 실패; 스킵.", file=sys.stderr)
+            return cookies
+        print("[AUTH - FAIL] login 실패", file=sys.stderr)
+        return {}
 
-    return role_sessions
-
-
-# =====
-# 쿠키 저장 / 로드
-# =====
-# 역할별 인증 쿠키를 저장
-def save_cookies(run_path_fn, role_sessions):
-    with open(run_path_fn("auth_cookies_roles.json"), "w", encoding="utf-8") as f:
-        json.dump(role_sessions, f, ensure_ascii=False, indent=2)
+    print(f"[AUTH] auth.type='{auth_type}' 미지정. 인증 없이 진행", file=sys.stderr)
+    return {} # 인증이 없거나 실패시 빈 dict 반환
 
 
-# 역할별 인증 쿠키를 로드하여 반환
-def load_cookies(run_path_fn: Callable[[str], str]) -> dict[str, dict]:
-    all_cookies = load_json(run_path_fn("auth_cookies_roles.json"), {})
-    role_cookies: dict[str, dict] = {"guest": {}}
-    cookies = all_cookies.get("member1") or all_cookies.get("member", {})
-    if cookies:
-        role_cookies["member1"] = cookies
-    return role_cookies
 
