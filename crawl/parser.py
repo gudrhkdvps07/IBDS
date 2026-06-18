@@ -67,16 +67,10 @@ class HtmlParser:
         for tag in soup.find_all("a", href=True):
             urls.append(urljoin(page_url, tag["href"]))
 
-        for tag in soup.find_all("link", href=True):
-            urls.append(urljoin(page_url, tag["href"]))
-
         for tag in soup.find_all("script", src=True):
             urls.append(urljoin(page_url, tag["src"]))
 
         for tag in soup.find_all("iframe", src=True):
-            urls.append(urljoin(page_url, tag["src"]))
-
-        for tag in soup.find_all("img", src=True):
             urls.append(urljoin(page_url, tag["src"]))
 
         # <meta http-equiv="refresh" content="5; url=...">
@@ -85,7 +79,9 @@ class HtmlParser:
             if url:
                 urls.append(url)
 
-        # TODO: button[formaction], button[formmethod] - 나중에 주입할때 확장 추가 하면 어떨까 싶음
+        # TODO: 
+        # 1. link 부분도 나중에 필요하면 rel="canonical", rel="alternate"만 선별 수집
+        # 2. button[formaction], button[formmethod] - 나중에 주입할때 확장 추가 하면 어떨까 싶음
 
         return urls
 
