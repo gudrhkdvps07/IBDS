@@ -60,7 +60,7 @@ class HtmlParser:
             forms.append(Form(action=action, method=method, fields=fields, enctype=enctype))
         return forms
 
-    # 페이지 내 모든 URL 수집 (a, link, script, iframe, img, meta refresh)
+    # 페이지 내 모든 URL 수집
     def _parse_links(self, soup: BeautifulSoup, page_url: str) -> list[str]:
         urls = []
 
