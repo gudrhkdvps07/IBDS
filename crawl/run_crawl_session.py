@@ -4,7 +4,11 @@
 target_config 읽어서 인증 크롤링 실행
 크롤 결과 저장, proxy snapshot 생성
 """
+import argparse
+import json
 import os
+from dataclasses import asdict
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,26 +18,40 @@ from crawl.crawler import Crawler
 from authentication.auth import get_auth_cookies
 from core.session_context import (
     get_or_create_current_capture,
+    get_proxy_history_path,
     create_session_id,
     get_session_dir,
     snapshot_proxy_history,
+    save_session_meta,
 )
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TARGET_CONFIG_PATH = os.path.join(_BASE_DIR, "..", "target_config.json")
+_PROJECT_ROOT = os.path.dirname(_BASE_DIR)
+_DEFAULT_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "target_config.json")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="크롤 세션 실행")
+    parser.add_argument(
+        "--target-config",
+        default=_DEFAULT_CONFIG_PATH,
+        help=f"target_config.json 경로 (기본: {_DEFAULT_CONFIG_PATH})",
+    )
+    parser.add_argument("--proxy-host", default=None, help="프록시 호스트 (기본: proxy_config.json 참조)")
+    parser.add_argument("--proxy-port", type=int, default=None, help="프록시 포트 (기본: proxy_config.json 참조)")
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    # target_config.json의 대상 URL과 인증 설정 로드
-    config = load_json(TARGET_CONFIG_PATH, {})
+    args = _parse_args()
+
+    config = load_json(args.target_config, {})
     base_url = config.get("target_url", os.getenv("TARGET_URL", "http://localhost:8080"))
     auth_cfg = config.get("auth", {})
 
-    # 인증 쿠키 획득 결과
     auth_cookies = get_auth_cookies(auth_cfg, base_url=base_url) or None
 
-    # mitmproxy가 생성한 현재 capture 식별자
     capture_id = get_or_create_current_capture()
-    # 이번 크롤링 실행 단위 session 생성
     session_id = create_session_id()
     session_dir = get_session_dir(session_id)
     os.makedirs(session_dir, exist_ok=True)
@@ -45,19 +63,66 @@ if __name__ == "__main__":
         ("member", auth_cookies),
     ]
 
-    for role, cookies in roles: # member가 있으면 member, guest 두번 크롤
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    all_results: list[dict] = []
+
+    for role, cookies in roles:
         if role == "member" and not cookies:
             print(f"[CRAWL] auth 설정 없음, member 크롤링 생략")
             continue
 
         print(f"\n[CRAWL] === {role} 크롤링 시작 ===")
-        output_file = os.path.join(session_dir, f"crawl_result_{role}.json")  # session 폴더 저장
-
-        crawler = Crawler(base_url, init_cookies=cookies)
+        crawler = Crawler(
+            base_url,
+            init_cookies=cookies,
+            skip_auth=(role == "guest"),
+            proxy_host=args.proxy_host,
+            proxy_port=args.proxy_port,
+        )
         crawler.crawl()
-        crawler.save(output_file)
         crawler.summary()
+        for r in crawler.results:
+            r.role = role
+        all_results.extend(asdict(r) for r in crawler.results)
 
-    # 크롤링 종료 후 현재 proxy_history.jsonl의 session 폴더 복사
-    history_path = snapshot_proxy_history(capture_id, session_id)
-    print(f"[SESSION] snapshot -> {history_path}")
+    output_file = os.path.join(session_dir, "crawl_result.json")
+    os.makedirs(session_dir, exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, ensure_ascii=False, indent=2)
+    print(f"[CRAWL] saved: {output_file}")
+
+    finished_at = datetime.now(timezone.utc).isoformat()
+
+    # proxy 설정 정보 (meta 저장용)
+    from proxy.capture_config import build_proxy_url, _load_proxy_config
+    proxy_cfg = _load_proxy_config()
+    proxy_host = args.proxy_host or proxy_cfg.get("host", "127.0.0.1")
+    proxy_port = args.proxy_port or proxy_cfg.get("port", 8081)
+    proxy_enabled = bool(build_proxy_url(host=args.proxy_host, port=args.proxy_port))
+
+    meta = {
+        "session_id": session_id,
+        "capture_id": capture_id,
+        "target_url": base_url,
+        "proxy": {
+            "enabled": proxy_enabled,
+            "host": proxy_host,
+            "port": proxy_port,
+        },
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    meta_path = save_session_meta(session_dir, meta)
+    print(f"[SESSION] meta → {meta_path}")
+
+    # 원본 proxy_history.jsonl에서 target_url + 세션 시간 범위 필터링
+    source_path = get_proxy_history_path(capture_id)
+    snapshot_path = os.path.join(session_dir, "proxy_history_snapshot.jsonl")
+    snapshot_proxy_history(
+        source_path=source_path,
+        output_path=snapshot_path,
+        target_url=base_url,
+        started_at=started_at,
+        finished_at=finished_at,
+    )

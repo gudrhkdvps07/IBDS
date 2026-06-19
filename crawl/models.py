@@ -32,6 +32,7 @@ class ParsedPage:
 class PageResult:
     url: str
     status_code: int
+    role: str = ""
     forms: list[dict] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
     danger_links: list[dict] = field(default_factory=list)
