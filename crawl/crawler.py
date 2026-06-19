@@ -16,7 +16,7 @@ import requests
 from dotenv import load_dotenv
 
 from authentication.auth import LOGIN_URL, ensure_login_url, login as _do_login
-from proxy.proxy_config import apply_proxy
+from proxy.capture_config import apply_proxy
 from crawl.models import PageResult
 from crawl.config import CrawlConfig
 from crawl.url_filter import UrlFilter
@@ -33,10 +33,20 @@ OUTPUT_FILE = os.getenv("OUTPUT_FILE", f"results/run_{_RUN_TS}/crawl_result.json
 
 # 인증, 수집, 파싱, 저장을 담당하는 크롤러 클래스
 class Crawler:
-    def __init__(self, base_url: str = BASE_URL, init_cookies: dict | None = None):
+    def __init__(
+        self,
+        base_url: str = BASE_URL,
+        init_cookies: dict | None = None,
+        skip_auth: bool = False,
+        proxy_host: str | None = None,
+        proxy_port: int | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
+        self.proxy_host = proxy_host
+        self.proxy_port = proxy_port
         self.session = self._make_session()
         self.init_cookies = init_cookies
+        self.skip_auth = skip_auth
         self.auth_cookies: dict = {}
         self.visited: set[str] = set()
         self.queue: deque[str] = deque()
@@ -59,7 +69,7 @@ class Crawler:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
         })
-        apply_proxy(session)
+        apply_proxy(session, host=self.proxy_host, port=self.proxy_port)
         return session
 
     # 로그인 수행 및 인증 쿠키 저장
@@ -79,6 +89,9 @@ class Crawler:
 
     # 외부 쿠키 또는 로그인 URL 기반 인증 준비
     def _prepare_auth(self) -> None:
+        if self.skip_auth:
+            return
+
         if self.init_cookies: # 쿠키 인증
             self.session.cookies.update(self.init_cookies)
             self.auth_cookies = dict(self.init_cookies)
@@ -195,7 +208,7 @@ if __name__ == "__main__":
 
     # 단독 실행 시 target_config.json 기반 설정 로드
     _config = _load_json(
-        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "target_config.json"), {}
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "config", "target_config.json"), {}
     )
     _base_url = _config.get("target_url", BASE_URL)
     _init_cookies = _get_auth_cookies(_config.get("auth", {}), base_url=_base_url) or None

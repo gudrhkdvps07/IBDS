@@ -49,7 +49,7 @@ class LoginAssessment:
 
 # 요청 세션 생성
 def _make_session() -> requests.Session:
-    from proxy.proxy_config import apply_proxy
+    from proxy.capture_config import apply_proxy
     session = requests.Session()
     session.headers.update({
         "User-Agent": (

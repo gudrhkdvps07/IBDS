@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 from mitmproxy import http
 
@@ -17,29 +18,46 @@ from core.session_context import (
 
 
 # 캡처에서 제외할 정적 파일 확장자
-STATIC_EXTENSIONS = (
+_STATIC_EXTENSIONS = (
     ".css", ".js", ".png", ".jpg", ".jpeg", ".gif",
     ".ico", ".woff", ".woff2", ".ttf", ".eot", ".svg",
     ".map", ".webp", ".bmp", ".pdf", ".zip",
 )
 
+# 브라우저 잡다한 트래픽 호스트 (정확히 일치해야함)
+_JUNK_HOSTS = {
+    "detectportal.firefox.com",
+    "safebrowsing.googleapis.com",
+    "push.services.mozilla.com",
+    "updates.push.services.mozilla.com",
+    "normandy.cdn.mozilla.net",
+    "incoming.telemetry.mozilla.org",
+    "content-signature.cdn.mozilla.net",
+    "shavar.services.mozilla.com",
+}
 
-# TARGET_URL 환경변수에서 scope 필터링에 쓸 host, port 추출
-def _target_host_port() -> tuple[str, int | None]:
-    target_url = os.getenv("TARGET_URL", "")
-    if not target_url:
-        return "", None  # TARGET_URL 미설정 시 빈 문자열 반환 -> 전체 트래픽 캡처
-    parsed = urlparse(target_url)
-    return parsed.hostname or "", parsed.port
+# 브라우저 잡트래픽 호스트 suffix (endswith 비교)
+_JUNK_HOST_SUFFIXES = (
+    ".firefox.com",
+    ".mozilla.com",
+    ".mozilla.net",
+    ".mozilla.org",
+    ".google-analytics.com",
+    ".googletagmanager.com",
+    ".doubleclick.net",
+)
 
 
-# 정적 파일 요청 여부 확인 (쿼리스트링 제거 후 확장자 비교)
 def _is_static(path: str) -> bool:
     bare = path.split("?")[0].lower()
-    return any(bare.endswith(ext) for ext in STATIC_EXTENSIONS)
+    return any(bare.endswith(ext) for ext in _STATIC_EXTENSIONS)
 
 
-# Cookie 헤더 문자열을 dict로 파싱
+def _is_junk_host(host: str) -> bool:
+    h = host.lower()
+    return h in _JUNK_HOSTS or any(h.endswith(s) for s in _JUNK_HOST_SUFFIXES)
+
+
 def _parse_cookies(cookie_header: str) -> dict[str, str]:
     cookies: dict[str, str] = {}
     for part in cookie_header.split(";"):
@@ -50,49 +68,32 @@ def _parse_cookies(cookie_header: str) -> dict[str, str]:
     return cookies
 
 
-# 쿼리스트링 파싱 -> [{name, value}] 리스트로 변환
 def _params_as_list(qs: str) -> list[dict[str, str]]:
     result = []
-    for name, values in parse_qs(qs, keep_blank_values=True).items():  # parse_qs는 같은 키에 여러 값이 올 수 있어서 루프로 펼쳐서 저장
-        for value in values: 
+    for name, values in parse_qs(qs, keep_blank_values=True).items():
+        for value in values:
             result.append({"name": name, "value": value})
     return result
 
 
 class CaptureAddon:
-    # mitmproxy 시작 시 호출해 항상 새 capture 생성
     def __init__(self) -> None:
-        self._host, self._port = _target_host_port()
-        self._capture_id = create_new_capture()  # .current_capture 덮어씀
+        self._capture_id = create_new_capture()
         os.makedirs(get_capture_dir(self._capture_id), exist_ok=True)
         self._output_file = get_proxy_history_path(self._capture_id)
-        print(f"[capture] target={self._host}:{self._port}")
+        print(f"[capture] capture_id={self._capture_id}")
         print(f"[capture] → {self._output_file}")
 
-    # TARGET_URL 기준으로 scope 내 요청인지 확인
-    # _host가 비어 있으면 전체 허용
-    def _in_scope(self, req: http.Request) -> bool:
-        if not self._host:
-            return True
-        if req.host != self._host:
-            return False
-        if self._port is not None and req.port != self._port:
-            return False
-        return True
-
-    # 요청마다 호출 -> scope/정적파일 필터링 후 record를 jsonl에 append
     def request(self, flow: http.HTTPFlow) -> None:
         req = flow.request
 
-        if not self._in_scope(req):
+        if _is_junk_host(req.host):
             return
         if _is_static(req.path):
             return
 
         parsed = urlparse(req.pretty_url)
         base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
-        # GET 쿼리스트링 파라미터
         parameters = _params_as_list(parsed.query)
 
         content_type = req.headers.get("content-type", "")
@@ -102,7 +103,6 @@ class CaptureAddon:
                 body = req.text
             except Exception:
                 pass
-            # form 데이터면 파라미터로도 파싱해서 추가
             if "application/x-www-form-urlencoded" in content_type:
                 try:
                     parameters += _params_as_list(body)
@@ -112,6 +112,7 @@ class CaptureAddon:
         cookies = _parse_cookies(req.headers.get("cookie", ""))
 
         record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "method": req.method,
             "scheme": parsed.scheme,
             "host": req.host,
