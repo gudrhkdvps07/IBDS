@@ -1,12 +1,13 @@
-이중에서 원하는걸로 쓰면 되는데 dvwa의 경우 세션방식 권장
+config/target_config.json 작성 예시
 인증 없이 쓰려면 auth 블록 자체를 빼거나 type을 비워두면 됨.
+dvwa의 경우 세션 방식 권장.
 
-// 세션방식
+// 세션 방식 (쿠키 직접 입력)
 {
-    "target_url": "타겟링크",
+    "target_url": "http://타겟IP:포트",
     "auth": {
         "type": "session",
-        "cookies": { // 나온 쿠키값 다 적기
+        "cookies": {
             "PHPSESSID": "세션아이디",
             "security": "low"
         }
@@ -14,12 +15,18 @@
 }
 
 
-// login 방식
+// 로그인 방식 (자동 로그인)
 {
-    "target_url": "타겟링크",
+    "target_url": "http://타겟IP:포트",
     "auth": {
         "type": "login",
         "username": "admin",
         "password": "password"
     }
+}
+
+
+// 인증 없음
+{
+    "target_url": "http://타겟IP:포트"
 }
