@@ -37,8 +37,6 @@ def _parse_args() -> argparse.Namespace:
         default=_DEFAULT_CONFIG_PATH,
         help=f"target_config.json 경로 (기본: {_DEFAULT_CONFIG_PATH})",
     )
-    parser.add_argument("--proxy-host", default=None, help="프록시 호스트 (기본: proxy_config.json 참조)")
-    parser.add_argument("--proxy-port", type=int, default=None, help="프록시 포트 (기본: proxy_config.json 참조)")
     return parser.parse_args()
 
 
@@ -77,8 +75,6 @@ if __name__ == "__main__":
             base_url,
             init_cookies=cookies,
             skip_auth=(role == "guest"),
-            proxy_host=args.proxy_host,
-            proxy_port=args.proxy_port,
         )
         crawler.crawl()
         crawler.summary()
@@ -97,9 +93,9 @@ if __name__ == "__main__":
     # proxy 설정 정보 (meta 저장용)
     from proxy.capture_config import build_proxy_url, _load_proxy_config
     proxy_cfg = _load_proxy_config()
-    proxy_host = args.proxy_host or proxy_cfg.get("host", "127.0.0.1")
-    proxy_port = args.proxy_port or proxy_cfg.get("port", 8081)
-    proxy_enabled = bool(build_proxy_url(host=args.proxy_host, port=args.proxy_port))
+    proxy_host = proxy_cfg.get("host", "127.0.0.1")
+    proxy_port = proxy_cfg.get("port", 8081)
+    proxy_enabled = bool(build_proxy_url())
 
     meta = {
         "session_id": session_id,
