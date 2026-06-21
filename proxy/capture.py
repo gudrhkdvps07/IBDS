@@ -68,11 +68,11 @@ def _parse_cookies(cookie_header: str) -> dict[str, str]:
     return cookies
 
 
-def _params_as_list(qs: str) -> list[dict[str, str]]:
+def _params_as_list(qs: str, location: str = "query") -> list[dict[str, str]]:
     result = []
     for name, values in parse_qs(qs, keep_blank_values=True).items():
         for value in values:
-            result.append({"name": name, "value": value})
+            result.append({"name": name, "value": value, "request_location": location})
     return result
 
 
@@ -94,7 +94,7 @@ class CaptureAddon:
 
         parsed = urlparse(req.pretty_url)
         base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        parameters = _params_as_list(parsed.query)
+        parameters = _params_as_list(parsed.query, location="query")
 
         content_type = req.headers.get("content-type", "")
         body = ""
@@ -105,7 +105,7 @@ class CaptureAddon:
                 pass
             if "application/x-www-form-urlencoded" in content_type:
                 try:
-                    parameters += _params_as_list(body)
+                    parameters += _params_as_list(body, location="body")
                 except Exception:
                     pass
 

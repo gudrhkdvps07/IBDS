@@ -15,6 +15,7 @@ _STATIC_EXT = re.compile(
 """ 
 위험 키워드 -> risk tag 매핑
 path, 파라미터 이름, 파라미터 값에서 키워드 탐지 후 태그 부여
+여기는 계속 수정이 필요할듯.. 어떻게 해야 될까
 
 태그 설명
     setup : DB 초기화 혹은 설치 페이지 가능성
@@ -109,7 +110,7 @@ def _form_to_params(fields: list[dict], method: str) -> list[dict]:
         value = f.get("value", "")
         params.append({
             "name": name,
-            "location": location,
+            "request_location": location,
             "field_type": field_type,
             "sample_values": [value] if value is not None else [],
             "sources": ["crawl"],
@@ -121,19 +122,18 @@ def _form_to_params(fields: list[dict], method: str) -> list[dict]:
 # proxy 레코드 -> parameter 객체 배열 변환
 def _proxy_rec_to_params(rec: dict) -> list[dict]:
     method = rec.get("method", "GET").upper()
-    # TODO: POST 요청의 query string 파라미터와 body 파라미터 구분 필요
-    # 현재 proxy 레코드에 위치 정보 없어 method 기준으로만 구분 (추후 개선 필요)
-    location = "query" if method == "GET" else "body"
+    default_location = "query" if method == "GET" else "body"  # location 없을경우 fallback
     params = []
     for p in rec.get("parameters", []):
         name = p.get("name", "")
         if not name:
             continue
         value = p.get("value", "")
+        location = p.get("request_location", default_location)  # capture.py가 기록한 location 우선
         params.append({
             "name": name,
-            "location": location,
-            "field_type": "text", # 프록시는 field_type 정보가 없으므로 text로 고정
+            "request_location": location,
+            "field_type": "text",  # 프록시만 캡쳐한 경우, field_type 정보가 없으므로 text로 고정
             "sample_values": [value] if value is not None else [],
             "sources": ["proxy"],
             "scan": _param_scannable(name, "text"),
@@ -143,9 +143,9 @@ def _proxy_rec_to_params(rec: dict) -> list[dict]:
 
 # name, location 기준 파라미터 병합
 def _merge_params(base: list[dict], incoming: list[dict]) -> list[dict]:
-    index: dict[tuple, dict] = {(p["name"], p["location"]): p for p in base}
+    index: dict[tuple, dict] = {(p["name"], p["request_location"]): p for p in base}
     for p in incoming:
-        key = (p["name"], p["location"])
+        key = (p["name"], p["request_location"])
         if key in index: # 중복 시 sources, sample_values 합산
             ex = index[key]
             for s in p.get("sources", []):
