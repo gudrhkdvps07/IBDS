@@ -29,14 +29,16 @@ _PROJECT_ROOT = os.path.dirname(_BASE_DIR)
 _DEFAULT_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "target_config.json")
 
 
-if __name__ == "__main__":
-    config = load_json(_DEFAULT_CONFIG_PATH, {})
+# 크롤 세션 실행 및 정보 반환
+def run_crawl_session(config_path: str | None = None, with_proxy: bool = True) -> dict:
+    config_path = config_path or _DEFAULT_CONFIG_PATH
+    config = load_json(config_path, {})
     base_url = config.get("target_url", os.getenv("TARGET_URL", "http://localhost:8080"))
     auth_cfg = config.get("auth", {})
 
     auth_cookies = get_auth_cookies(auth_cfg, base_url=base_url) or None
 
-    capture_id = get_or_create_current_capture()
+    capture_id = get_or_create_current_capture() if with_proxy else None
     session_id = create_session_id()
     session_dir = get_session_dir(session_id)
     os.makedirs(session_dir, exist_ok=True)
@@ -49,7 +51,6 @@ if __name__ == "__main__":
     ]
 
     started_at = datetime.now(timezone.utc).isoformat()
-
     all_results: list[dict] = []
 
     for role, cookies in roles:
@@ -70,19 +71,20 @@ if __name__ == "__main__":
         all_results.extend(asdict(r) for r in crawler.results)
 
     output_file = os.path.join(session_dir, "crawl_result.json")
-    os.makedirs(session_dir, exist_ok=True)
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
     print(f"[CRAWL] saved: {output_file}")
 
     finished_at = datetime.now(timezone.utc).isoformat()
 
-    # proxy 설정 정보 (meta 저장용)
-    from proxy.capture_config import build_proxy_url, _load_proxy_config
-    proxy_cfg = _load_proxy_config()
-    proxy_host = proxy_cfg.get("host", "127.0.0.1")
-    proxy_port = proxy_cfg.get("port", 8081)
-    proxy_enabled = bool(build_proxy_url())
+    if with_proxy:
+        from proxy.capture_config import build_proxy_url, _load_proxy_config
+        proxy_cfg = _load_proxy_config()
+        proxy_host = proxy_cfg.get("host", "127.0.0.1")
+        proxy_port = proxy_cfg.get("port", 8081)
+        proxy_enabled = bool(build_proxy_url())
+    else:
+        proxy_host, proxy_port, proxy_enabled = "127.0.0.1", 8081, False
 
     meta = {
         "session_id": session_id,
@@ -99,13 +101,27 @@ if __name__ == "__main__":
     meta_path = save_session_meta(session_dir, meta)
     print(f"[SESSION] meta → {meta_path}")
 
-    # 원본 proxy_history.jsonl에서 target_url + 세션 시간 범위 필터링
-    source_path = get_proxy_history_path(capture_id)
     snapshot_path = os.path.join(session_dir, "proxy_history_snapshot.jsonl")
-    snapshot_proxy_history(
-        source_path=source_path,
-        output_path=snapshot_path,
-        target_url=base_url,
-        started_at=started_at,
-        finished_at=finished_at,
-    )
+    if with_proxy and capture_id:
+        source_path = get_proxy_history_path(capture_id)
+        snapshot_proxy_history(
+            source_path=source_path,
+            output_path=snapshot_path,
+            target_url=base_url,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+    else:
+        open(snapshot_path, "w").close()
+        print(f"[SESSION] proxy 없음 → 빈 snapshot 생성: {snapshot_path}")
+
+    return {
+        "session_id": session_id,
+        "session_dir": session_dir,
+        "capture_id": capture_id,
+        "target_url": base_url,
+    }
+
+
+if __name__ == "__main__":
+    run_crawl_session(with_proxy=True)
