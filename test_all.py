@@ -14,7 +14,7 @@ def main():
     print("=" * 50)
     print("[PIPELINE] Step 1: 크롤 세션 실행")
     print("=" * 50)
-    result = run_crawl_session(with_proxy=False)
+    result = run_crawl_session(with_proxy=True)
 
     session_dir = Path(result["session_dir"])
     print(f"\n[PIPELINE] session_dir: {session_dir}")
