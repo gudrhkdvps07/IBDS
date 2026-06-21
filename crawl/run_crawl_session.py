@@ -4,7 +4,6 @@
 target_config 읽어서 인증 크롤링 실행
 크롤 결과 저장, proxy snapshot 생성
 """
-import argparse
 import json
 import os
 from dataclasses import asdict
@@ -30,20 +29,8 @@ _PROJECT_ROOT = os.path.dirname(_BASE_DIR)
 _DEFAULT_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "target_config.json")
 
 
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="크롤 세션 실행")
-    parser.add_argument(
-        "--target-config",
-        default=_DEFAULT_CONFIG_PATH,
-        help=f"target_config.json 경로 (기본: {_DEFAULT_CONFIG_PATH})",
-    )
-    return parser.parse_args()
-
-
 if __name__ == "__main__":
-    args = _parse_args()
-
-    config = load_json(args.target_config, {})
+    config = load_json(_DEFAULT_CONFIG_PATH, {})
     base_url = config.get("target_url", os.getenv("TARGET_URL", "http://localhost:8080"))
     auth_cfg = config.get("auth", {})
 

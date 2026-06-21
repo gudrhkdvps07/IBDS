@@ -52,6 +52,7 @@ def get_session_dir(session_id: str) -> str:
     return os.path.join(_RESULTS_DIR, "sessions", session_id)
 
 
+# 포트가 생략된 URL일 경우, http =80, https=443으로 채워주는 용도
 def _default_port(scheme: str) -> int:
     return 443 if scheme == "https" else 80
 
@@ -67,11 +68,7 @@ def snapshot_proxy_history(
     started_at: str,
     finished_at: str,
 ) -> None:
-    """
-    source_path의 proxy_history.jsonl에서 다음 조건을 만족하는 줄만 output_path에 저장:
-    - scheme / host / port 가 target_url과 일치
-    - timestamp 가 started_at 이상 finished_at 이하
-    """
+
     target = urlparse(target_url)
     target_host = target.hostname or ""
     target_port = target.port or _default_port(target.scheme)
@@ -88,8 +85,7 @@ def snapshot_proxy_history(
         open(output_path, "w").close()
         return
 
-    with open(source_path, encoding="utf-8") as src, \
-         open(output_path, "w", encoding="utf-8") as dst:
+    with open(source_path, encoding="utf-8") as src, open(output_path, "w", encoding="utf-8") as dst:
         for line in src:
             line = line.strip()
             if not line:
@@ -99,13 +95,15 @@ def snapshot_proxy_history(
             except json.JSONDecodeError:
                 continue
 
+            # scheme, host, port 가 target_url과 일치하는 부분만 저장
             if record.get("scheme") != target_scheme:
                 continue
             if record.get("host") != target_host:
                 continue
             if record.get("port") != target_port:
                 continue
-
+            
+            # timestamp 가 started_at 이상 finished_at 이하인 부분만 저장
             ts_raw = record.get("timestamp")
             if not ts_raw:
                 continue

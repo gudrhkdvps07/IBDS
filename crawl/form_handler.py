@@ -2,7 +2,7 @@
 발견된 Form을 제출할지 결정 및 요청 수행부
 
 GET form일 경우 제출하고
-POST form일 경우 제출하지 않음.
+POST form일 경우 제출하지 않고 수집만 진행함. 
 """
 
 from urllib.parse import urlparse, urlunparse
