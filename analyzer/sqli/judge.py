@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import html
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from urllib.parse import quote
 
 from .payloads import DB_ERROR_KEYWORDS
 
 # Time-based 기준
-SLEEP_THRESHOLD = 4.5    # SLEEP(5) 페이로드 기준, 이 이상 걸리면 "느림"
-MIN_REPEAT_CONFIRM = 2   # 최소 이 횟수만큼 재현돼야 confirmed
+SLEEP_THRESHOLD = 4.5
+MIN_REPEAT_CONFIRM = 2
+
+# Boolean 비교 기준
+_NOISY_DELTA = 0.05
 
 
 @dataclass
@@ -18,7 +22,6 @@ class SqliVerdict:
     evidence: str
 
 
-# ZAP SqlInjectionScanRule.stripOff() 방식: 원문 + 인코딩된 변형들을 다 지운다
 def _strip_value(body: str, value: str) -> str:
     if not value:
         return body
@@ -29,46 +32,56 @@ def _strip_value(body: str, value: str) -> str:
     return body
 
 
-# ZAP testBooleanBasedSqlInjection() 순서를 그대로 따른다:
-# AND-true가 baseline과 같아야만(게이트) AND-false를 보고, AND-false도 baseline과
-# 같으면(원래 결과가 비어있었을 수 있음) 그제서야 OR-true를 본다.
-# AND-true가 baseline과 다르면 즉시 안전 처리 — base_value가 빈 문자열일 때
-# "값이 비어있다가 채워지는 것" 자체로 페이지 구조가 바뀌는 경우의 오탐을 막기 위함
-# (xss_r 실측에서 발견된 문제).
+def _noise_floor(base_ratio: float) -> float:
+    if base_ratio == 1.0:
+        return 1.0                   # exact 비교
+    return base_ratio - _NOISY_DELTA # 동적 페이지
+
+
+def _is_same(a: str, b: str, floor: float) -> bool:
+    return SequenceMatcher(None, a, b).ratio() >= floor
+
+
+def _is_different(a: str, b: str, floor: float) -> bool:
+    return not _is_same(a, b, floor)
+
+
 def judge_boolean_sqli(
     baseline_body: str,
     and_true_body: str, and_false_body: str, or_true_body: str,
     base_value: str,
     and_true_payload: str, and_false_payload: str, or_true_payload: str,
+    base_ratio: float = 1.0,
 ) -> SqliVerdict:
+    floor = _noise_floor(base_ratio)
+
     base_clean      = _strip_value(baseline_body, base_value)
     and_true_clean  = _strip_value(and_true_body, and_true_payload)
     and_false_clean = _strip_value(and_false_body, and_false_payload)
     or_true_clean   = _strip_value(or_true_body, or_true_payload)
 
-    # 게이트: AND-true가 baseline과 다르면 SQL 논리로 해석 안 되는 것 -> 포기
-    if and_true_clean != base_clean:
+    # AND-true 게이트: baseline과 같아야 통과 (동적 콘텐츠도 허용)
+    if _is_different(and_true_clean, base_clean, floor):
         return SqliVerdict(False, "", "AND-true가 baseline과 다름 — SQL 논리로 해석되지 않음 (안전)")
 
-    # AND-false가 다르면 -> AND 패턴 확정
-    if and_false_clean != base_clean:
+    # 탐지 판정: baseline과 달라야 SQLi
+    if _is_different(and_false_clean, base_clean, floor):
         return SqliVerdict(
             True, "high",
-            "Boolean SQLi (AND 패턴): AND-true==baseline, AND-false는 다름"
+            f"Boolean SQLi (AND 패턴): AND-true==baseline, AND-false는 다름 (floor={floor:.3f})"
         )
 
-    # AND-false도 같다 -> 원래 결과가 비어있었을 수 있음, OR-true로 한 번 더 확인
-    if or_true_clean != base_clean:
+    if _is_different(or_true_clean, base_clean, floor):
         return SqliVerdict(
             True, "high",
-            "Boolean SQLi (OR 패턴): AND만으론 차이 없었으나 OR-true에서 확장 확인됨"
+            f"Boolean SQLi (OR 패턴): AND만으론 차이 없었으나 OR-true에서 확장 확인됨 (floor={floor:.3f})"
         )
 
     return SqliVerdict(False, "", "AND/OR 모두 baseline과 동일 — 안전")
 
 
 def judge_error_based_sqli(baseline_body: str, attack_body: str) -> SqliVerdict:
-    base_lower = (baseline_body or "").lower()
+    base_lower   = (baseline_body or "").lower()
     attack_lower = (attack_body or "").lower()
 
     for kw in DB_ERROR_KEYWORDS:
@@ -82,9 +95,7 @@ def judge_error_based_sqli(baseline_body: str, attack_body: str) -> SqliVerdict:
     return SqliVerdict(False, "", "DB 에러 시그니처 없음")
 
 
-
 def judge_time_based_sqli(baseline_elapsed: float, attack_elapsed_list: list[float]) -> SqliVerdict:
-    """attack_elapsed_list: 같은 time-based 페이로드를 여러 번 보낸 각각의 elapsed time."""
     slow_count = sum(1 for e in attack_elapsed_list if e >= SLEEP_THRESHOLD)
 
     if slow_count == 0:

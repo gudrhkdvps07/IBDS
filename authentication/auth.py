@@ -452,4 +452,14 @@ def get_auth_cookies(
     return {} # 인증이 없거나 실패시 빈 dict 반환
 
 
+def get_demo_dvwa_cookies() -> dict:
+    """DEMO_DVWA_AUTH=1 일 때 .env의 PHPSESSID를 스캔 세션으로 직접 반환."""
+    if os.getenv("DEMO_DVWA_AUTH", "0") != "1":
+        return {}
+    phpsessid = os.getenv("DEMO_DVWA_PHPSESSID", "").strip()
+    if not phpsessid:
+        return {}
+    return {"PHPSESSID": phpsessid, "security": "low"}
+
+
 

@@ -30,13 +30,18 @@ _DEFAULT_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "target_config.json
 
 
 # 크롤 세션 실행 및 정보 반환
-def run_crawl_session(config_path: str | None = None, with_proxy: bool = True) -> dict:
+def run_crawl_session(
+    config_path: str | None = None,
+    with_proxy: bool = True,
+    override_auth_cookies: dict | None = None,
+) -> dict:
     config_path = config_path or _DEFAULT_CONFIG_PATH
     config = load_json(config_path, {})
     base_url = config.get("target_url", os.getenv("TARGET_URL", "http://localhost:8080"))
     auth_cfg = config.get("auth", {})
 
-    auth_cookies = get_auth_cookies(auth_cfg, base_url=base_url) or None
+    # 외부에서 쿠키를 직접 주입한 경우 우선 사용 (DEMO 모드 등)
+    auth_cookies = override_auth_cookies or get_auth_cookies(auth_cfg, base_url=base_url) or None
 
     capture_id = get_or_create_current_capture() if with_proxy else None
     session_id = create_session_id()

