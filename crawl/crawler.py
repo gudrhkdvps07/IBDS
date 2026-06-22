@@ -1,109 +1,66 @@
-# crawler.py
+"""
+크롤러 오케스트레이션
+
+전체 크롤링 흐름을 실행하는 부분임
+"""
+
 import json
 import os
-import re
 import sys
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import datetime
-from typing import Optional
-from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
-
+from urllib.parse import parse_qs, urlparse
 import requests
-from bs4 import BeautifulSoup  # type: ignore[reportMissingModuleSource]
 from dotenv import load_dotenv
 
 from authentication.auth import LOGIN_URL, ensure_login_url, login as _do_login
-from proxy.proxy_config import apply_proxy
+from proxy.capture_config import apply_proxy
+from crawl.models import PageResult
+from crawl.config import CrawlConfig
+from crawl.url_filter import UrlFilter
+from crawl.parser import HtmlParser
+from crawl.input_tracker import InputTracker
+from crawl.form_handler import FormHandler
 
 load_dotenv()
 
-# 대상 URL 및 결과 저장 경로
 BASE_URL = os.getenv("TARGET_URL", "http://localhost:8080")
-_RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+_RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")  # 이번 실행 시각을 파일에 넣기 위한 부분
 OUTPUT_FILE = os.getenv("OUTPUT_FILE", f"results/run_{_RUN_TS}/crawl_result.json")
 
 
-# 크롤링에서 제외할 URL 패턴 (로그아웃, 정적 파일 등)
-EXCLUDE_PATTERNS = [
-    r"logout",
-    r"signout",
-    r"\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|zip|woff|ttf|eot)(\?|$)",
-]
-
-# 상태 변경 가능성 있는 링크 패턴 
-DANGER_LINK_PATTERNS = [
-    r"delete",
-    r"remove",
-    r"move",
-    r"copy",
-    r"update",
-    r"modify",
-    r"write_update",
-    r"comment_update",
-    r"file_delete",
-    r"dbupgrade",
-    r"truncate",
-    r"drop",
-    r"reset",
-]
-
-
-# 크롤링 동작 설정값
-class CrawlConfig:
-    MAX_PAGES = int(os.getenv("CRAWL_MAX_PAGES", "500"))               # 최대 크롤링 페이지 수
-    MIN_PAGES = int(os.getenv("CRAWL_MIN_PAGES", "100"))               # 조기 종료 검사 시작 기준
-    STAGNATION_LIMIT = int(os.getenv("CRAWL_STAGNATION_LIMIT", "50"))  # 새 입력 구조 없이 허용할 최대 페이지 수
-    DELAY = float(os.getenv("CRAWL_DELAY", "0.3"))                     # 요청 간 딜레이 (초)
-    TIMEOUT = int(os.getenv("CRAWL_TIMEOUT", "10"))                    # HTTP 요청 타임아웃 (초)
-
-
-# =============================================================================
-# 모델
-# =============================================================================
-
-# 폼 내 단일 입력 필드
-@dataclass
-class FormField:
-    name: str
-    field_type: str
-    value: str = ""
-    options: list = field(default_factory=list)
-
-
-# HTML <form> 하나를 표현
-@dataclass
-class Form:
-    action: str
-    method: str
-    fields: list = field(default_factory=list)
-    enctype: str = "application/x-www-form-urlencoded"
-
-
-# 페이지 크롤링 결과 (URL, 상태코드, 폼, 링크, 쿼리 파라미터 등)
-@dataclass
-class PageResult:
-    url: str
-    status_code: int
-    forms: list = field(default_factory=list)
-    links: list = field(default_factory=list)
-    danger_links: list = field(default_factory=list)
-    query_params: dict = field(default_factory=dict)
-    page_title: str = ""
-    is_error_page: bool = False
-
-
-# =============================================================================
-# 크롤러
-# =============================================================================
+# 인증, 수집, 파싱, 저장을 담당하는 크롤러 클래스
 class Crawler:
-    def __init__(self, base_url: str = BASE_URL, init_cookies: dict | None = None):
+    def __init__(
+        self,
+        base_url: str = BASE_URL,
+        init_cookies: dict | None = None,
+        skip_auth: bool = False,
+        proxy_host: str | None = None,
+        proxy_port: int | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
-        self.parsed_base = urlparse(self.base_url)
-        self.session = requests.Session()
-        # 브라우저처럼 보이도록 User-Agent 설정
-        self.session.headers.update({
+        self.proxy_host = proxy_host
+        self.proxy_port = proxy_port
+        self.session = self._make_session()
+        self.init_cookies = init_cookies
+        self.skip_auth = skip_auth
+        self.auth_cookies: dict = {}
+        self.visited: set[str] = set()
+        self.queue: deque[str] = deque()
+        self.results: list[PageResult] = []
+
+        self.filter = UrlFilter(self.base_url)
+        self.parser = HtmlParser()
+        self.tracker = InputTracker(CrawlConfig.MIN_PAGES, CrawlConfig.STAGNATION_LIMIT)
+        self.form_handler = FormHandler(self.session, CrawlConfig.TIMEOUT)
+
+    # 크롤링에 사용할 요청 세션 생성
+    def _make_session(self) -> requests.Session:
+        session = requests.Session()
+        session.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -112,125 +69,102 @@ class Crawler:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
         })
+        apply_proxy(session, host=self.proxy_host, port=self.proxy_port)
+        return session
 
-        apply_proxy(self.session) # 프록시 추가
-
-        self.init_cookies: dict | None = init_cookies
-        self.auth_cookies: dict = {}
-        self.visited: set[str] = set()           # 이미 방문한 URL
-        self.queue: deque[str] = deque()          # 방문 예정 URL 큐
-        self.results: list[PageResult] = []       # 크롤링 결과 누적
-        self.seen_input_structures: set[tuple] = set()  # 중복 입력 구조 필터용 시그니처
-        self.no_new_input_pages = 0              # 새 입력 구조 없는 연속 페이지 수
-
-
-    # --- 
-    # URL 필터링 유틸리티 
-    # ---
-
-    # 같은 도메인인지 확인
-    def _is_in_scope(self, url: str) -> bool:
-        parsed = urlparse(url)
-        return parsed.scheme in ("http", "https") and parsed.netloc == self.parsed_base.netloc
-
-    # 제외 패턴에 해당하는 URL인지 확인
-    def _is_excluded(self, url: str) -> bool:
-        return any(re.search(pattern, url, re.IGNORECASE) for pattern in EXCLUDE_PATTERNS)
-
-    # 상태 변경 가능성이 있는 URL은 방문하지 않고 danger_links로만 수집
-    def _is_danger_link(self, url: str) -> bool:
-        parsed = urlparse(url)
-        target = f"{parsed.path}?{parsed.query}"
-        return any(re.search(pattern, target, re.IGNORECASE) for pattern in DANGER_LINK_PATTERNS)
-
-    def _normalize(self, url: str) -> str:
-        return urlparse(url)._replace(fragment="").geturl()
-
-
-    # --- 
-    # 중복 입력 구조 감지용 시그니처 
-    # ---
-
-    # 쿼리 파라미터 키 조합으로 GET 입력 구조 식별
-    def _query_signature(self, url: str) -> Optional[tuple]:
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query, keep_blank_values=True)
-        if not params:
-            return None
-        return ("QUERY", "GET", parsed.path or "/", tuple(sorted(params.keys())))
-
-    # 폼 액션 + 메서드 + 필드명 조합으로 폼 구조 식별
-    def _form_signature(self, form: Form) -> tuple:
-        parsed = urlparse(form.action)
-        return (
-            "FORM",
-            form.method.upper(),
-            parsed.path or form.action,
-            tuple(sorted(field.name for field in form.fields if field.name)),
-        )
-
-    # MIN_PAGES 이상 크롤 후 새 입력 구조가 STAGNATION_LIMIT 연속으로 없으면 조기 종료
-    def _should_stop_early(self, crawled: int) -> bool:
-        return crawled >= CrawlConfig.MIN_PAGES and self.no_new_input_pages >= CrawlConfig.STAGNATION_LIMIT
-
-    # GET 요청, 실패 시 None 반환
-    def _fetch(self, url: str) -> Optional[requests.Response]:
-        try:
-            return self.session.get(url, timeout=CrawlConfig.TIMEOUT, allow_redirects=True)
-        except requests.RequestException as exc:
-            print(f"[ERROR] fetch failed: {url} ({exc})", file=sys.stderr)
-            return None
-
-
-    # ==========================================================================
-    # 로그인
-    # ==========================================================================
-    
-    # auth.py의 login() 호출 후 쿠키를 인스턴스에 저장
+    # 로그인 수행 및 인증 쿠키 저장
     def login(self, login_url: str = "") -> bool:
         success, cookies = _do_login(self.session, url=login_url, base_url=self.base_url)
         if success:
             self.auth_cookies = cookies
         return success
 
-    def _parse_form(self, form_tag, page_url: str) -> Form:
-        action = urljoin(page_url, form_tag.get("action") or page_url)
-        method = (form_tag.get("method") or "GET").upper()
-        enctype = form_tag.get("enctype") or "application/x-www-form-urlencoded"
-        fields = []
-        for inp in form_tag.find_all(["input", "textarea", "select"]):
-            name = inp.get("name")
-            if not name:
-                continue
-            field_type = inp.get("type") or inp.name
-            value = inp.get("value", "")
-            options = [opt.get("value", opt.text.strip()) for opt in inp.find_all("option")] if inp.name == "select" else []
-            fields.append(FormField(name=name, field_type=field_type, value=value, options=options))
-        return Form(action=action, method=method, fields=fields, enctype=enctype)
+    # URL 하나에 GET 요청을 보내고 응답 반환
+    def _fetch(self, url: str) -> requests.Response | None:
+        try:
+            return self.session.get(url, timeout=CrawlConfig.TIMEOUT, allow_redirects=True) # 성공시 응답 반환
+        except requests.RequestException as exc:
+            print(f"[ERROR] 응답 실패 : {url} ({exc})", file=sys.stderr)
+            return None
 
-    # 로그인 → 시드 URL 큐 적재 → BFS 크롤링 수행
-    def crawl(self, extra_seeds: list[str] | None = None, progress_callback=None) -> list[PageResult]:
-        if self.init_cookies:
+    # 외부 쿠키 또는 로그인 URL 기반 인증 준비
+    def _prepare_auth(self) -> None:
+        if self.skip_auth:
+            return
+
+        if self.init_cookies: # 쿠키 인증
             self.session.cookies.update(self.init_cookies)
             self.auth_cookies = dict(self.init_cookies)
-            print(f"[AUTH] using provided cookies: {list(self.init_cookies.keys())}")
-        else:
-            login_url = os.getenv("LOGIN_URL", LOGIN_URL) or ensure_login_url(self.base_url)
-            if login_url:
-                if not self.login(login_url):
-                    print("[WARN] login failed; continuing anonymously", file=sys.stderr)
-            else:
-                print("[AUTH] no login URL found; continuing anonymously")
+            print(f"[AUTH] 인증 쿠키 사용 : {list(self.init_cookies.keys())}")
+            return
 
-        self.queue.append(self._normalize(self.base_url + "/"))
+        login_url = os.getenv("LOGIN_URL", LOGIN_URL) or ensure_login_url(self.base_url)
+        if login_url: # 로그인 인증
+            if not self.login(login_url):
+                print("[WARN] 로그인 실패. guest로 계속합니다.", file=sys.stderr)
+        else:
+            print("[AUTH] login URL 찾기 실패. guest로 계속합니다.")
+
+
+    # 응답 페이지에서 입력 구조와 링크 추출
+    def _process_page(self, url: str, resp: requests.Response) -> PageResult:
+        result = PageResult(url=url, status_code=resp.status_code)
+
+        parsed_url = urlparse(url) # 구조별로 URL 나눔
+        if parsed_url.query:       # 쿼리 있으면 dict로 바꿔 저장
+            result.query_params = parse_qs(parsed_url.query, keep_blank_values=True)
+
+        content_type = resp.headers.get("content-type", "") 
+        if not self.parser.is_html(content_type, resp.text):  # 응답이 HTML인지 확인
+            return result
+
+        # HTML 본문에서 제목, 폼, 링크 추출
+        parsed = self.parser.parse(resp.text, url)
+        result.page_title = parsed.title
+
+        found_new_input = False
+
+        for form in parsed.forms:
+            result.forms.append(asdict(form))
+            if self.tracker.add_form(form): # 이 form 구조가 처음 보는 입력 구조인지 확인
+                found_new_input = True
+            submitted = self.form_handler.submit(form) # form 제출해보기
+            if submitted is not None:  # 성공해서 응답 있으면
+                norm = self.filter.normalize(submitted.url) # fragment 제거
+                if norm not in self.visited: # 제출 결과로 이동한 URL이 있고, 아직 방문 안했으면 큐에 추가
+                    self.queue.append(norm)
+
+        # 위험 링크는 기록만 하고 방문 제외
+        for raw_link in parsed.links:
+            link = self.filter.normalize(raw_link)
+            if not self.filter.can_visit(link):
+                continue
+            if self.filter.is_danger_link(link):
+                result.danger_links.append({"url": link, "method": "GET", "reason": "danger_url"})
+                continue
+            result.links.append(link)
+            if link not in self.visited:
+                self.queue.append(link)
+
+        if self.tracker.add_query_url(url):
+            found_new_input = True
+
+        self.tracker.update_stagnation(found_new_input)
+        return result
+
+    # 큐 기반 페이지 순회 및 크롤링 실행
+    def crawl(self, extra_seeds: list[str] | None = None, progress_callback=None) -> list[PageResult]:
+        self._prepare_auth()
+
+        self.queue.append(self.filter.normalize(self.base_url + "/"))
         for seed in (extra_seeds or []):
             self.queue.append(seed)
 
         crawled = 0
         while self.queue and crawled < CrawlConfig.MAX_PAGES:
-            url = self.queue.popleft()
-            url = self._normalize(url)
-            if url in self.visited or self._is_excluded(url) or not self._is_in_scope(url):
+            url = self.filter.normalize(self.queue.popleft())
+
+            if url in self.visited or not self.filter.can_visit(url):
                 continue
             self.visited.add(url)
 
@@ -240,102 +174,46 @@ class Crawler:
                 crawled += 1
                 continue
 
-            result = PageResult(url=url, status_code=resp.status_code)
-
-            # URL 쿼리 파라미터 저장
-            parsed = urlparse(url)
-            if parsed.query:
-                result.query_params = parse_qs(parsed.query, keep_blank_values=True)
-
-            # HTML 응답인 경우 폼과 링크 파싱
-            content_type = resp.headers.get("content-type", "")
-            if "html" in content_type.lower() or "<html" in resp.text[:500].lower():
-                soup = BeautifulSoup(resp.text, "lxml")
-                title = soup.find("title")
-                result.page_title = title.get_text(strip=True) if title else ""
-
-                for form_tag in soup.find_all("form"):
-                    form = self._parse_form(form_tag, url)
-                    result.forms.append(asdict(form))
-                    self.seen_input_structures.add(self._form_signature(form))
-
-                    if form.method == "POST" and "multipart/form-data" not in form.enctype:
-                        try:
-                            payload = {f.name: f.value for f in form.fields if f.name}
-                            self.session.post(form.action, data=payload, timeout=CrawlConfig.TIMEOUT)
-                        except requests.RequestException:
-                            pass
-                    elif form.method == "GET":
-                        payload = {f.name: f.value for f in form.fields if f.name}
-                        if payload:
-                            try:
-                                parsed_action = urlparse(form.action)
-                                clean_action = urlunparse(parsed_action._replace(query="", fragment=""))
-                                submitted = self.session.get(
-                                    clean_action,
-                                    params=payload,
-                                    timeout=CrawlConfig.TIMEOUT,
-                                    allow_redirects=True,
-                                )
-                                norm = self._normalize(submitted.url)
-                                if norm not in self.visited:
-                                    self.queue.append(norm)
-                            except requests.RequestException:
-                                pass
-
-                for a in soup.find_all("a", href=True):
-                    link = self._normalize(urljoin(url, a["href"]))
-                    if self._is_in_scope(link) and not self._is_excluded(link):
-                        if self._is_danger_link(link):
-                            result.danger_links.append({
-                                "url": link,
-                                "method": "GET",
-                                "reason": "mutating_url",
-                            })
-                            continue
-                        result.links.append(link)
-                        if link not in self.visited:
-                            self.queue.append(link)
-
-            # 새 입력 구조 발견 여부로 stagnation 카운터 업데이트
-            pre_size = len(self.seen_input_structures)
-
-            query_sig = self._query_signature(url)
-            if query_sig:
-                self.seen_input_structures.add(query_sig)
-
+            result = self._process_page(url, resp)
             self.results.append(result)
             crawled += 1
 
-            if len(self.seen_input_structures) == pre_size:
-                self.no_new_input_pages += 1
-            else:
-                self.no_new_input_pages = 0
-
             if progress_callback:
                 progress_callback(crawled, CrawlConfig.MAX_PAGES)
-            if self._should_stop_early(crawled):
-                print("[STOP] no new input structures recently")
+            if self.tracker.should_stop(crawled):
+                print("[STOP] 최근동안 새로운 입력 구조를 발견하지 못했습니다.")
                 break
             time.sleep(CrawlConfig.DELAY)
 
         return self.results
 
-    # 크롤링 결과를 JSON 파일로 저장
+    # 수집 결과 JSON 파일 저장
     def save(self, path: str = OUTPUT_FILE) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump([asdict(result) for result in self.results], f, ensure_ascii=False, indent=2)
+            json.dump([asdict(r) for r in self.results], f, ensure_ascii=False, indent=2)
         print(f"[CRAWLER] saved: {path}")
 
-    # 크롤링 통계 출력 (페이지 수, 폼 수, 쿼리 파라미터 보유 페이지 수)
+    # 수집 결과 요약 출력
     def summary(self) -> None:
-        forms = sum(len(page.forms) for page in self.results)
-        queries = sum(1 for page in self.results if page.query_params)
+        forms = sum(len(p.forms) for p in self.results)
+        queries = sum(1 for p in self.results if p.query_params)
         print(f"[CRAWLER] pages={len(self.results)}, forms={forms}, query_pages={queries}")
 
+
 if __name__ == "__main__":
-    crawler = Crawler(BASE_URL)
+    import os as _os
+    from utilities.file_utils import load_json as _load_json
+    from authentication.auth import get_auth_cookies as _get_auth_cookies
+
+    # 단독 실행 시 target_config.json 기반 설정 로드
+    _config = _load_json(
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "config", "target_config.json"), {}
+    )
+    _base_url = _config.get("target_url", BASE_URL)
+    _init_cookies = _get_auth_cookies(_config.get("auth", {}), base_url=_base_url) or None
+
+    crawler = Crawler(_base_url, init_cookies=_init_cookies)
     crawler.crawl()
     crawler.save(OUTPUT_FILE)
     crawler.summary()

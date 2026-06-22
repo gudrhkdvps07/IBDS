@@ -19,6 +19,7 @@ log/
 z_checkset/
 CLAUDE.md
 results/
+test/
 
 
 # Debug logs

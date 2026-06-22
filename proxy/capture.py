@@ -1,38 +1,61 @@
-"""
-크롤러 HTTP 요청을 captured_requests.jsonl에 저장
-
-실행:
-    mitmdump -s proxy/capture.py -p 8081
-"""
 import json
 import os
-from datetime import datetime
+import sys
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
-
 from mitmproxy import http
 
-STATIC_EXTENSIONS = (
+# proxy/ 하위에 있으므로 프로젝트 루트를 sys.path에 추가 -> core 같은 패키지를 import하기 위함.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from core.session_context import (
+    create_new_capture,
+    get_capture_dir,
+    get_proxy_history_path,
+)
+
+
+# 캡처에서 제외할 정적 파일 확장자
+_STATIC_EXTENSIONS = (
     ".css", ".js", ".png", ".jpg", ".jpeg", ".gif",
     ".ico", ".woff", ".woff2", ".ttf", ".eot", ".svg",
     ".map", ".webp", ".bmp", ".pdf", ".zip",
 )
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_RUN_ID_FILE = os.path.join(_PROJECT_ROOT, "results", ".run_id")
-_FALLBACK_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+# 브라우저 잡다한 트래픽 호스트 (정확히 일치해야함)
+_JUNK_HOSTS = {
+    "detectportal.firefox.com",
+    "safebrowsing.googleapis.com",
+    "push.services.mozilla.com",
+    "updates.push.services.mozilla.com",
+    "normandy.cdn.mozilla.net",
+    "incoming.telemetry.mozilla.org",
+    "content-signature.cdn.mozilla.net",
+    "shavar.services.mozilla.com",
+}
 
-# TARGET_URL 환경변수에서 (hostname, port) 추출
-def _target_host_port() -> tuple[str, int | None]:
-    target_url = os.getenv("TARGET_URL", "http://localhost:8080")
-    if not target_url:
-        return "", None
-    parsed = urlparse(target_url)
-    return parsed.hostname or "", parsed.port
+# 브라우저 잡트래픽 호스트 suffix (endswith 비교)
+_JUNK_HOST_SUFFIXES = (
+    ".firefox.com",
+    ".mozilla.com",
+    ".mozilla.net",
+    ".mozilla.org",
+    ".google-analytics.com",
+    ".googletagmanager.com",
+    ".doubleclick.net",
+)
 
 
 def _is_static(path: str) -> bool:
     bare = path.split("?")[0].lower()
-    return any(bare.endswith(ext) for ext in STATIC_EXTENSIONS)
+    return any(bare.endswith(ext) for ext in _STATIC_EXTENSIONS)
+
+
+def _is_junk_host(host: str) -> bool:
+    h = host.lower()
+    return h in _JUNK_HOSTS or any(h.endswith(s) for s in _JUNK_HOST_SUFFIXES)
 
 
 def _parse_cookies(cookie_header: str) -> dict[str, str]:
@@ -45,83 +68,66 @@ def _parse_cookies(cookie_header: str) -> dict[str, str]:
     return cookies
 
 
-# query string → [{"name": k, "value": v}, ...]  (중복 키 보존)
-def _params_as_list(qs: str) -> list[dict[str, str]]:
+def _params_as_list(qs: str, location: str = "query") -> list[dict[str, str]]:
     result = []
     for name, values in parse_qs(qs, keep_blank_values=True).items():
         for value in values:
-            result.append({"name": name, "value": value})
+            result.append({"name": name, "value": value, "request_location": location})
     return result
 
 
 class CaptureAddon:
     def __init__(self) -> None:
-        self._host, self._port = _target_host_port()
-        self._run_id: str = ""
-        self._output_file: str = ""
-        print(f"[capture] target={self._host}:{self._port}")
-
-    def _resolve_output_file(self) -> str:
-        try:
-            with open(_RUN_ID_FILE) as f:
-                run_id = f.read().strip()
-        except FileNotFoundError:
-            run_id = _FALLBACK_TS
-
-        if run_id != self._run_id:
-            self._run_id = run_id
-            run_dir = os.path.join(_PROJECT_ROOT, "results", f"run_{run_id}")
-            self._output_file = os.path.join(run_dir, "captured_requests.jsonl")
-            os.makedirs(run_dir, exist_ok=True)
-            print(f"[capture] new session → {self._output_file}")
-
-        return self._output_file
-
-    def _in_scope(self, req: http.Request) -> bool:
-        if not self._host:
-            return True
-        if req.host != self._host:
-            return False
-        if self._port is not None and req.port != self._port:
-            return False
-        return True
+        self._capture_id = create_new_capture()
+        os.makedirs(get_capture_dir(self._capture_id), exist_ok=True)
+        self._output_file = get_proxy_history_path(self._capture_id)
+        print(f"[capture] capture_id={self._capture_id}")
+        print(f"[capture] → {self._output_file}")
 
     def request(self, flow: http.HTTPFlow) -> None:
         req = flow.request
 
-        if not self._in_scope(req):
+        if _is_junk_host(req.host):
             return
         if _is_static(req.path):
             return
 
         parsed = urlparse(req.pretty_url)
         base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        parameters = _params_as_list(parsed.query, location="query")
 
-        # GET query string 파라미터
-        parameters = _params_as_list(parsed.query)
-
-        # POST application/x-www-form-urlencoded 파라미터
+        content_type = req.headers.get("content-type", "")
+        body = ""
         if req.method == "POST":
-            ct = req.headers.get("content-type", "")
-            if "application/x-www-form-urlencoded" in ct:
+            try:
+                body = req.text
+            except Exception:
+                pass
+            if "application/x-www-form-urlencoded" in content_type:
                 try:
-                    parameters += _params_as_list(req.text)
+                    parameters += _params_as_list(body, location="body")
                 except Exception:
                     pass
 
         cookies = _parse_cookies(req.headers.get("cookie", ""))
 
         record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "method": req.method,
+            "scheme": parsed.scheme,
+            "host": req.host,
+            "port": req.port,
+            "path": parsed.path,
             "full_url": req.pretty_url,
             "base_url": base_url,
             "parameters": parameters,
+            "content_type": content_type,
+            "body": body,
             "cookies": cookies,
             "headers": dict(req.headers),
         }
 
-        output_file = self._resolve_output_file()
-        with open(output_file, "a", encoding="utf-8") as f:
+        with open(self._output_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         print(f"[capture] {req.method} {req.pretty_url}  params={len(parameters)}")
