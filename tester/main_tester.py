@@ -1,21 +1,16 @@
 import sys
+import os
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from loader import load_cases
 from http_executor import HttpExecutor
 from response_store import HtmlResponseStore
 from result_writer import ResultWriter
+from core.session_context import latest_session_dir
 
 _CASES_PATH = "tester/sample_test_cases.json"  # 입력 test case 파일 경로 (고정)
-
-
-# 가장 최근 세션 디렉토리 반환
-def _latest_session_dir() -> Path:
-    sessions = sorted(Path("results/sessions").glob("session_*"))  # 이름이 timestamp라 정렬 = 최신순
-    if not sessions:
-        print("[ERROR] 세션 폴더가 없습니다. 크롤을 먼저 실행하세요.", file=sys.stderr)
-        sys.exit(1)
-    return sessions[-1]
 
 
 def main():
@@ -25,7 +20,11 @@ def main():
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
 
-    session_dir = _latest_session_dir()
+    try:
+        session_dir = latest_session_dir()
+    except FileNotFoundError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
     out_path = session_dir / "test_results.jsonl"
     store = HtmlResponseStore(Path("results/sessions/responses/html"))  # 실행 시작 시 responses/html/ 초기화
 

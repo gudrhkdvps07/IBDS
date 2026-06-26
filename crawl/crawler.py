@@ -15,8 +15,7 @@ from urllib.parse import parse_qs, urlparse
 import requests
 from dotenv import load_dotenv
 
-from authentication.auth import LOGIN_URL, ensure_login_url, login as _do_login
-from proxy.capture_config import apply_proxy
+from authentication.auth import LOGIN_URL, ensure_login_url, login as _do_login, make_session
 from crawl.models import PageResult
 from crawl.config import CrawlConfig
 from crawl.url_filter import UrlFilter
@@ -44,7 +43,7 @@ class Crawler:
         self.base_url = base_url.rstrip("/")
         self.proxy_host = proxy_host
         self.proxy_port = proxy_port
-        self.session = self._make_session()
+        self.session = make_session(proxy_host=proxy_host, proxy_port=proxy_port)
         self.init_cookies = init_cookies
         self.skip_auth = skip_auth
         self.auth_cookies: dict = {}
@@ -56,21 +55,6 @@ class Crawler:
         self.parser = HtmlParser()
         self.tracker = InputTracker(CrawlConfig.MIN_PAGES, CrawlConfig.STAGNATION_LIMIT)
         self.form_handler = FormHandler(self.session, CrawlConfig.TIMEOUT)
-
-    # 크롤링에 사용할 요청 세션 생성
-    def _make_session(self) -> requests.Session:
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
-        })
-        apply_proxy(session, host=self.proxy_host, port=self.proxy_port)
-        return session
 
     # 로그인 수행 및 인증 쿠키 저장
     def login(self, login_url: str = "") -> bool:

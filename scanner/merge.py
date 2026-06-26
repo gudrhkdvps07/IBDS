@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 from utilities.file_utils import load_json, save_json
+from core.session_context import latest_session_dir
 
 
 _STATIC_EXT = re.compile(
@@ -315,16 +316,8 @@ def merge(session_dir: Path) -> list[dict]:
     return _build_targets(proxy_groups, form_index, danger_urls, form_meta)
 
 
-# results/sessions/ 하위 가장 최근 세션 디렉터리 반환
-def _latest_session_dir() -> Path:
-    sessions = sorted(Path("results/sessions").glob("session_*"))
-    if not sessions:
-        raise FileNotFoundError("results/sessions/session_* 디렉터리가 없습니다.")
-    return sessions[-1]
-
-
 if __name__ == "__main__":
-    session_dir = _latest_session_dir()
+    session_dir = latest_session_dir()
     output_path = session_dir / "scan_targets.json"
 
     print(f"[MERGE] session dir : {session_dir}")

@@ -48,7 +48,7 @@ class LoginAssessment:
 
 
 # 요청 세션 생성
-def _make_session() -> requests.Session:
+def make_session(proxy_host: str | None = None, proxy_port: int | None = None) -> requests.Session:
     from proxy.capture_config import apply_proxy
     session = requests.Session()
     session.headers.update({
@@ -60,7 +60,7 @@ def _make_session() -> requests.Session:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
     })
-    apply_proxy(session) # 프록시 추가
+    apply_proxy(session, host=proxy_host, port=proxy_port)
     return session
 
 
@@ -270,7 +270,7 @@ def discover_login_url(base_url: str, timeout: int = _TIMEOUT) -> str:
     if not base_url:
         return ""
 
-    session = _make_session()
+    session = make_session()
     candidates: list[tuple[int, str]] = []
 
     try:
@@ -433,7 +433,7 @@ def get_auth_cookies(
         username = auth_cfg.get("username", "")
         password = auth_cfg.get("password", "")
         fail_indicator = auth_cfg.get("fail_indicator", "")
-        session = _make_session()
+        session = make_session()
         ok, cookies = login(
             session,
             url=login_url,

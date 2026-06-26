@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -118,6 +119,14 @@ def snapshot_proxy_history(
             matched += 1
 
     print(f"[SESSION] snapshot → {output_path}  ({matched} records)")
+
+
+# results/sessions/ 하위 가장 최근 세션 디렉터리 반환
+def latest_session_dir() -> Path:
+    sessions = sorted(Path(_RESULTS_DIR, "sessions").glob("session_*"))
+    if not sessions:
+        raise FileNotFoundError("results/sessions/session_* 디렉터리가 없습니다.")
+    return sessions[-1]
 
 
 def save_session_meta(session_dir: str, meta: dict) -> str:
