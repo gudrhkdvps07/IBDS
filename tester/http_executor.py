@@ -58,10 +58,6 @@ class HttpExecutor:
             "request": request_summary,
         }
 
-        if case.get("engine") != "http":  # 미지원 engine skipped 처리
-            return {**base, "response": None, "error": None,
-                    "skipped": True, "skip_reason": f"unsupported engine: {case.get('engine')!r}"}
-
         if body_type not in _SUPPORTED_BODY_TYPES:  # 미지원 body_type skipped 처리
             return {**base, "response": None, "error": None,
                     "skipped": True, "skip_reason": f"unsupported body_type: {body_type!r}"}

@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from loader import load_cases
-from http_executor import HttpExecutor
+from router import Router
 from response_store import HtmlResponseStore
 from result_writer import ResultWriter
 from core.session_context import latest_session_dir
@@ -33,7 +33,7 @@ def main():
 
     counts = {"ok": 0, "err": 0, "skip": 0}  # 실행 결과 집계
 
-    with ResultWriter(str(out_path)) as writer, HttpExecutor(response_store=store) as executor:
+    with ResultWriter(str(out_path)) as writer, Router(response_store=store) as executor:
         for case in cases:
             result = executor.execute(case)
             writer.write(result)
