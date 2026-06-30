@@ -24,3 +24,6 @@ test/
 
 # Debug logs
 debug-*.log
+
+# 인증서
+*.cer

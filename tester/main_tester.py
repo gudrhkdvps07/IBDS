@@ -51,7 +51,7 @@ def main():
                 counts["err"] += 1
                 print(f"[ERR]   {case_id}: {result['error']}")
 
-    print(f"\nDone — {counts['ok']} ok / {counts['err']} error / {counts['skip']} skipped")
+    print(f"\nDone - {counts['ok']} ok / {counts['err']} error / {counts['skip']} skipped")
     print(f"Results saved to {out_path}")
 
 
