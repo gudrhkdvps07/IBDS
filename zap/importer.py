@@ -2,7 +2,7 @@ import re
 from urllib.parse import urlparse, parse_qs
 from core.request_target import RequestTarget
 
-# 정적 파일 확장자 (scanner/merge.py에서 이식)
+# 정적 파일 확장자
 _STATIC_EXT = re.compile(
     r"\.(css|js|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|pdf|zip|map)(\?|$)",
     re.IGNORECASE,
@@ -15,8 +15,8 @@ def _first_line(raw: str) -> str:
     return (raw.split("\r\n")[0] if "\r\n" in raw else raw.split("\n")[0]).strip()
 
 
-# requestHeader 첫 줄 파싱 → (method, path)
-# 예: "GET /path?q=1 HTTP/1.1" → ("GET", "/path?q=1")
+# requestHeader 첫 줄 파싱(method, path)해 tuple에 저장
+# 예: "GET /path?q=1 HTTP/1.1" -> ("GET", "/path?q=1")
 def _parse_request_line(raw: str) -> tuple[str, str]:
     parts = _first_line(raw).split(" ")
     if len(parts) >= 2:
@@ -24,8 +24,8 @@ def _parse_request_line(raw: str) -> tuple[str, str]:
     return "", ""
 
 
-# responseHeader 첫 줄 파싱 → status code
-# 예: "HTTP/1.1 200 OK" → 200
+# responseHeader 첫 줄 파싱 (status code) 해 int로 저장
+# 예: "HTTP/1.1 200 OK" -> 200
 def _parse_response_status(raw: str) -> int:
     parts = _first_line(raw).split(" ")
     if len(parts) >= 2:
@@ -36,7 +36,7 @@ def _parse_response_status(raw: str) -> int:
     return 0
 
 
-# raw HTTP 헤더 블록 → dict (첫 줄 스킵)
+# raw HTTP 헤더 블록 -> 헤더의 각 키, 값을 dict로 (첫 줄 스킵)
 def _parse_headers_block(raw: str) -> dict[str, str]:
     headers = {}
     lines = raw.replace("\r\n", "\n").split("\n") if raw else []
@@ -92,8 +92,8 @@ def to_targets(messages: list[dict]) -> list[RequestTarget]:
         header_method, header_path = _parse_request_line(req_header_raw)
         if not method:
             method = header_method
-        if method != "GET":
-            continue
+        if method != "GET": # 일단은 GET만, 나중에 POST도 넣을거임.
+            continue 
 
         req_headers = _parse_headers_block(req_header_raw)
 
@@ -110,7 +110,7 @@ def to_targets(messages: list[dict]) -> list[RequestTarget]:
         if not raw_params:
             continue
 
-        # 값이 여러 개인 파라미터는 첫 번째 값만 사용 (ponytail: MVP 단순화)
+        # 값이 여러 개인 파라미터는 첫 번째 값만 저장 (mvp형태. 나중에 달라질 수 있음.)
         query_params = {k: v[0] for k, v in raw_params.items()}
         base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 

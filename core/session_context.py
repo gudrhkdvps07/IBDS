@@ -133,5 +133,5 @@ def save_session_meta(session_dir: str, meta: dict) -> str:
     os.makedirs(session_dir, exist_ok=True)
     path = os.path.join(session_dir, "session_meta.json")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+        json.dump(meta, f, ensure_ascii=False, indent=4)
     return path

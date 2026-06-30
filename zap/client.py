@@ -8,14 +8,14 @@ _DEFAULT_CONFIG = os.path.join(_PROJECT_ROOT, "config", "zap_config.json")
 
 def _load_config(path=_DEFAULT_CONFIG):
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
 class ZapClient:
-    def __init__(self, host="127.0.0.1", port=8080, api_key=""):
+    def __init__(self, host="127.0.0.1", port=8081, api_key=""): # zapClient 인스턴스 생성
         self._base = f"http://{host}:{port}"
         self._api_key = api_key
         self._http = httpx.Client(timeout=10)
@@ -25,7 +25,7 @@ class ZapClient:
         cfg = _load_config(path)
         return cls(
             host=cfg.get("host", "127.0.0.1"),
-            port=cfg.get("port", 8080),
+            port=cfg.get("port", 8081),
             api_key=cfg.get("api_key", ""),
         )
 
@@ -40,10 +40,10 @@ class ZapClient:
         r.raise_for_status()
         return r.json()
 
-    # ZAP 메시지 1페이지 조회
+    # ZAP REST API에서 메시지 목록 조회
     def get_messages(self, base_url=None, start=0, count=200) -> list[dict]:
         return self._get(
-            "/JSON/core/view/messages/",
+            "/JSON/core/view/messages/", # ZAP REST API의 엔드포인트 경로
             baseurl=base_url, start=start, count=count,
         ).get("messages", [])
 

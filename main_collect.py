@@ -39,7 +39,7 @@ def main():
     sample = messages[:_SAMPLE_COUNT]
     save_json(_SAMPLE_PATH, sample)
     print(f"\n[SAMPLE] raw ZAP 메시지 {len(sample)}건 -> {_SAMPLE_PATH}")
-    print(json.dumps(sample, ensure_ascii=False, indent=2))
+    print(json.dumps(sample, ensure_ascii=False, indent=4))
 
     # RequestTarget 변환
     targets = to_targets(messages)

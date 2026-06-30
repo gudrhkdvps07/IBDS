@@ -53,8 +53,16 @@ Write-Host "[4/4] Saving ZAP root certificate..."
 Invoke-WebRequest "$ZAP_URL/OTHER/core/other/rootcert/?apikey=$API_KEY" -OutFile $CERT_PATH
 Write-Host "  Certificate saved: $CERT_PATH"
 
+# 5. generate zap_config.json
+$CONFIG_PATH = Join-Path $PSScriptRoot "config\zap_config.json"
+@{
+    host    = "127.0.0.1"
+    port    = $ZAP_PORT
+    api_key = $API_KEY
+} | ConvertTo-Json | Set-Content -Path $CONFIG_PATH -Encoding utf8
+Write-Host "[5/5] zap_config.json generated: $CONFIG_PATH"
+
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
-Write-Host "Firefox proxy  : 127.0.0.1:$ZAP_PORT"
-Write-Host "Firefox cert   : $CERT_PATH"
-Write-Host "  -> about:preferences#privacy > View Certificates > Authorities > Import"
+Write-Host "Please Set firefox proxy : your_local_ip:$ZAP_PORT" -ForegroundColor Red
+Write-Host "Firefox cert path   : $CERT_PATH"
