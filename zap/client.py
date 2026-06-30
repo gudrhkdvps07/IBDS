@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import httpx
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,6 +58,18 @@ class ZapClient:
                 break
             start += page_size
         return all_msgs
+
+    def start_spider(self, url) -> str:
+        return self._get("/JSON/spider/action/scan/", url=url)["scan"]
+
+    def wait_spider(self, scan_id, interval=2):
+        while True:
+            status = int(self._get("/JSON/spider/view/status/", scanId=scan_id)["status"])
+            print(f"\r[SPIDER] {status}%", end="", flush=True)
+            if status >= 100:
+                print()
+                break
+            time.sleep(interval)
 
     def close(self):
         self._http.close()
