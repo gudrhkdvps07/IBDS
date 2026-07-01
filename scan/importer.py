@@ -1,6 +1,6 @@
 import re
 from urllib.parse import urlparse, parse_qs
-from core.request_target import RequestTarget
+from scan.target import RequestTarget
 
 # 정적 파일 확장자
 _STATIC_EXT = re.compile(
@@ -78,9 +78,17 @@ def _safe_int(value) -> int:
         return 0
 
 
-# ZAP 메시지 목록 → RequestTarget 목록
-# 조건: GET 요청 + query parameter가 있는 것만 포함
-# 중복 제거: (base_url, 파라미터 이름 조합) 기준
+# POST 폼 바디(application/x-www-form-urlencoded) -> 파라미터 dict (첫 번째 값만)
+def _parse_form_body(body: str) -> dict[str, str]:
+    if not body:
+        return {}
+    raw = parse_qs(body, keep_blank_values=True)
+    return {k: v[0] for k, v in raw.items()}
+
+
+# ZAP 메시지 목록 -> RequestTarget 목록
+# 조건: GET은 query parameter, POST는 x-www-form-urlencoded 바디 파라미터가 있는 것만 포함 (JSON/multipart는 추후 구현)
+# 중복 제거: (method, base_url, param_location, 파라미터 이름 조합) 기준
 def to_targets(messages: list[dict]) -> list[RequestTarget]:
     seen: set[tuple] = set()
     targets = []
@@ -94,8 +102,8 @@ def to_targets(messages: list[dict]) -> list[RequestTarget]:
         header_method, header_path = _parse_request_line(req_header_raw)
         if not method:
             method = header_method
-        if method != "GET": # 일단은 GET만, 나중에 POST도 넣을거임.
-            continue 
+        if method not in ("GET", "POST"):
+            continue
 
         req_headers = _parse_headers_block(req_header_raw)
 
@@ -108,16 +116,26 @@ def to_targets(messages: list[dict]) -> list[RequestTarget]:
         if _STATIC_EXT.search(parsed.path):
             continue
 
-        raw_params = parse_qs(parsed.query, keep_blank_values=True)
-        if not raw_params:
-            continue
-
-        # 값이 여러 개인 파라미터는 첫 번째 값만 저장 (mvp형태. 나중에 달라질 수 있음.)
-        query_params = {k: v[0] for k, v in raw_params.items()}
         base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
-        # (base_url, 파라미터 이름 조합) 기준 중복 제거
-        dedup_key = (base_url, frozenset(query_params.keys()))
+        # 값이 여러 개인 파라미터는 첫 번째 값만 저장 (mvp형태. 나중에 달라질 수 있음.)
+        if method == "GET":
+            raw_params = parse_qs(parsed.query, keep_blank_values=True)
+            if not raw_params:
+                continue
+            params = {k: v[0] for k, v in raw_params.items()}
+            param_location = "query"
+        else:  # POST
+            content_type = req_headers.get("content-type", "")
+            if "application/x-www-form-urlencoded" not in content_type:
+                continue  # JSON/multipart 바디는 추후 구현
+            params = _parse_form_body(msg.get("requestBody", "") or "")
+            if not params:
+                continue
+            param_location = "body"
+
+        # (method, base_url, param_location, 파라미터 이름 조합) 기준 중복 제거
+        dedup_key = (method, base_url, param_location, frozenset(params.keys()))
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
@@ -132,7 +150,8 @@ def to_targets(messages: list[dict]) -> list[RequestTarget]:
             method=method,
             url=url,
             base_url=base_url,
-            query_params=query_params,
+            params=params,
+            param_location=param_location,
             headers=headers_clean,
             cookies=cookies,
             request_body=msg.get("requestBody", "") or "",

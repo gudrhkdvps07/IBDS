@@ -10,6 +10,7 @@ sys.path.insert(0, _PROJECT_ROOT)  # utilities/ 등 프로젝트 루트 패키�
 
 from utilities.file_utils import load_json, save_json, normalize_base_url
 from zap.collector.zap_collector import ZapCollector
+from scan.importer import to_targets
 
 _ZAP_CONFIG = os.path.join(_PROJECT_ROOT, "config", "zap_config.json")
 _TARGET_CONFIG = os.path.join(_PROJECT_ROOT, "config", "target_config.json")
@@ -22,8 +23,7 @@ _DEFAULT_AJAX_TIMEOUT = 300  # 초, MVP 기본값 (ZAP 자체 MaxDuration 60분�
 def _parse_args():
     parser = argparse.ArgumentParser(description="ZAP 수집기")
     parser.add_argument("--ajax", action="store_true", help="Ajax Spider 추가 실행 (기본: 비활성)")
-    parser.add_argument("--ajax-timeout", type=int, default=_DEFAULT_AJAX_TIMEOUT,
-                         help=f"Ajax Spider 최대 대기 시간(초), 기본 {_DEFAULT_AJAX_TIMEOUT}")
+    parser.add_argument("--ajax-timeout", type=int, default=_DEFAULT_AJAX_TIMEOUT, help=f"Ajax Spider 최대 대기 시간(초), 기본 {_DEFAULT_AJAX_TIMEOUT}")
     return parser.parse_args()
 
 
@@ -100,6 +100,12 @@ def main():
     messages_path = os.path.join(out_dir, "zap_messages.json")
     save_json(messages_path, messages)
     print(f"[ZAP] zap_messages.json -> {messages_path}")
+
+    # 수집된 raw 메시지를 scan target으로 정규화
+    targets = to_targets(messages)
+    targets_path = os.path.join(out_dir, "targets.json")
+    save_json(targets_path, [t.to_dict() for t in targets])
+    print(f"[ZAP] targets.json -> {targets_path} ({len(targets)}건)")
 
     meta_path = os.path.join(out_dir, "collection_meta.json")
     save_json(meta_path, ajax_meta)
