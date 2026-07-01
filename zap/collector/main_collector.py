@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 from datetime import datetime
@@ -14,7 +15,16 @@ _ZAP_CONFIG = os.path.join(_PROJECT_ROOT, "config", "zap_config.json")
 _TARGET_CONFIG = os.path.join(_PROJECT_ROOT, "config", "target_config.json")
 _DANGER_URL_FILE = os.path.join(_PROJECT_ROOT, "config", "spider_exclude.txt")
 
-USE_AJAX_SPIDER = True  # 끄고 켜기는 여기서만, CLI 옵션 미사용
+_DEFAULT_AJAX_TIMEOUT = 300  # 초, MVP 기본값 (ZAP 자체 MaxDuration 60분보다 짧게)
+
+
+# Ajax Spider는 SPA/JS-heavy 사이트 대응용 선택 옵션, 기본은 Spider only
+def _parse_args():
+    parser = argparse.ArgumentParser(description="ZAP 수집기")
+    parser.add_argument("--ajax", action="store_true", help="Ajax Spider 추가 실행 (기본: 비활성)")
+    parser.add_argument("--ajax-timeout", type=int, default=_DEFAULT_AJAX_TIMEOUT,
+                         help=f"Ajax Spider 최대 대기 시간(초), 기본 {_DEFAULT_AJAX_TIMEOUT}")
+    return parser.parse_args()
 
 
 # 위험 URL 정규식 목록 로드 (빈 줄/주석 제외)
@@ -26,6 +36,7 @@ def _load_danger_patterns(path: str) -> list[str]:
 
 
 def main():
+    args = _parse_args()
     target_cfg = load_json(_TARGET_CONFIG, default={})
     target_url = normalize_base_url(target_cfg.get("target_url", ""))
     if not target_url:
@@ -48,7 +59,7 @@ def main():
         collector.exclude_danger_urls(danger_patterns)  # Spider 실행 전 필수 등록
 
         if cookies:
-            collector.set_session_cookie(cookies)
+            collector.set_session_cookie(cookies, target_url)
             print(f"[ZAP] 세션 쿠키 주입: {', '.join(cookies)}")
 
         collector.access_target(target_url)
@@ -56,9 +67,19 @@ def main():
         print(f"[COLLECT] Spider 시작: {target_url}")
         collector.run_spider(target_url)
 
-        if USE_AJAX_SPIDER:
-            print(f"[COLLECT] Ajax Spider 시작: {target_url}")
-            collector.run_ajax_spider(target_url)
+        ajax_meta = {
+            "ajax_spider_enabled": args.ajax,
+            "ajax_spider_status": None,
+            "ajax_spider_completed": None,
+            "ajax_spider_timeout": args.ajax_timeout,
+            "ajax_spider_elapsed_seconds": None,
+        }
+        if args.ajax:
+            print(f"[COLLECT] Ajax Spider 시작 (최대 {args.ajax_timeout}초): {target_url}")
+            result = collector.run_ajax_spider(target_url, args.ajax_timeout)  # 타임아웃 초과해도 실패 처리 안 함
+            ajax_meta["ajax_spider_status"] = result["status"]
+            ajax_meta["ajax_spider_completed"] = result["completed"]
+            ajax_meta["ajax_spider_elapsed_seconds"] = result["elapsed_seconds"]
 
         if cookies:
             collector.clear_session_cookie()
@@ -79,6 +100,10 @@ def main():
     messages_path = os.path.join(out_dir, "zap_messages.json")
     save_json(messages_path, messages)
     print(f"[ZAP] zap_messages.json -> {messages_path}")
+
+    meta_path = os.path.join(out_dir, "collection_meta.json")
+    save_json(meta_path, ajax_meta)
+    print(f"[ZAP] collection_meta.json -> {meta_path}")
 
 
 if __name__ == "__main__":

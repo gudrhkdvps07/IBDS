@@ -1,5 +1,6 @@
 import re
 import time
+from urllib.parse import urlsplit
 
 from zapv2 import ZAPv2
 
@@ -30,11 +31,13 @@ class ZapCollector:
         self.zap.core.new_session(name=name, overwrite=True)
         print(f"[ZAP] 세션 생성: {name}")
 
-    # target 도메인 외 트래픽을 프록시 단에서 전역 제외 (범위 축소용, 위험 URL 필터링과는 별개)
+    # target origin(scheme+host+port) 밖 트래픽을 프록시 단에서 전역 제외, target_url에 path가 있어도 origin 기준 (범위 축소용, 위험 URL 필터링과는 별개)
     def restrict_to_target_domain(self, target_url: str):
-        regex = f"^(?:(?!{re.escape(target_url)}).)*$"
+        parts = urlsplit(target_url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+        regex = f"^(?:(?!{re.escape(origin)}).)*$"
         self.zap.core.exclude_from_proxy(regex=regex)
-        print(f"[ZAP] 전역 제외(target 외부 도메인): {regex}")
+        print(f"[ZAP] 전역 제외(target 외부 origin): {regex}")
 
     # Context 생성 + target include 등록
     def setup_context(self, target_url: str, name=CONTEXT_NAME) -> str:
@@ -50,13 +53,14 @@ class ZapCollector:
             self.zap.context.exclude_from_context(contextname=name, regex=pattern)
         print(f"[ZAP] Context 위험 URL 제외 {len(patterns)}건 등록")
 
-    # 로그인 세션 쿠키를 모든 프록시 요청 헤더에 주입 (Replacer 룰, 인증 Context 미사용)
-    def set_session_cookie(self, cookies: dict):
+    # 로그인 세션 쿠키를 target_url 범위 요청에만 주입 (Replacer 룰 url 스코프, 인증 Context 미사용)
+    def set_session_cookie(self, cookies: dict, target_url: str):
         cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
         self.zap.replacer.add_rule(
             description=_COOKIE_RULE_DESC, enabled=True,
             matchtype="REQ_HEADER", matchregex=False,
             matchstring="Cookie", replacement=cookie_str,
+            url=f"{re.escape(target_url)}.*",
         )
 
     def clear_session_cookie(self):
@@ -76,14 +80,31 @@ class ZapCollector:
             time.sleep(2)
         print("\r[SPIDER] 100% 완료")
 
-    # Ajax Spider 실행 (payload 전송기가 아닌 JS 기반 요청 발견용), stopped까지 폴링
-    def run_ajax_spider(self, target_url: str):
+    # Ajax Spider 실행 (SPA/JS 기반 요청 발견용, 선택 실행), timeout_seconds 초과 시 stop 후 결과 반환
+    def run_ajax_spider(self, target_url: str, timeout_seconds: int) -> dict:
         self.zap.ajaxSpider.scan(url=target_url, inscope=True)
         time.sleep(2)
+        start = time.time()
+        completed = True
         while self.zap.ajaxSpider.status != "stopped":
-            print(f"\r[AJAX SPIDER] {self.zap.ajaxSpider.status}", end="", flush=True)
+            elapsed = time.time() - start
+            if elapsed >= timeout_seconds:  # 시간 초과, 실패 아닌 정상 중단
+                completed = False
+                self.zap.ajaxSpider.stop()
+                print(f"\n[AJAX SPIDER] {timeout_seconds}초 초과, 중단 요청")
+                while self.zap.ajaxSpider.status != "stopped":
+                    time.sleep(1)
+                break
+            print(f"\r[AJAX SPIDER] {self.zap.ajaxSpider.status} ({int(elapsed)}s/{timeout_seconds}s)", end="", flush=True)
             time.sleep(2)
-        print("\r[AJAX SPIDER] stopped")
+        elapsed_seconds = round(time.time() - start, 1)
+        print(f"\r[AJAX SPIDER] {'완료' if completed else '타임아웃 중단'} (경과 {elapsed_seconds}s)")
+        return {
+            "status": self.zap.ajaxSpider.status,
+            "completed": completed,
+            "timeout": timeout_seconds,
+            "elapsed_seconds": elapsed_seconds,
+        }
 
     # raw 메시지 일부만 조회 (필드 구조 확인용)
     def get_messages_sample(self, base_url: str, count=3):
