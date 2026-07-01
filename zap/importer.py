@@ -62,6 +62,8 @@ def _build_url(msg: dict, req_headers: dict, path: str) -> str:
     url = (msg.get("url") or "").strip()
     if url:
         return url
+    if path.startswith(("http://", "https://")):  # path에 절대 URL이 들어오는 경우
+        return path
     host = req_headers.get("host", "")
     if not host:
         return path

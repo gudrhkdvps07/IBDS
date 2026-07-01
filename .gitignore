@@ -20,7 +20,7 @@ z_checkset/
 CLAUDE.md
 results/
 test/
-
+test_example_src/
 
 # Debug logs
 debug-*.log
