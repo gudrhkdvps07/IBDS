@@ -19,6 +19,7 @@ if ($existing -eq "zap") {
 Write-Host "[2/4] Starting ZAP container..."
 docker run -u zap --name zap `
     -p "${ZAP_PORT}:${ZAP_PORT}" `
+    -e "ZAP_PORT=${ZAP_PORT}" `
     -v zap_home:/home/zap/.ZAP `
     -d zaproxy/zap-stable `
     zap.sh -daemon `
