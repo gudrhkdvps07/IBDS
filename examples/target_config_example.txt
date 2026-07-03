@@ -3,6 +3,7 @@ config/target_config.json 작성 예시
 dvwa의 경우 세션 방식 권장.
 
 // 세션 방식 (쿠키 직접 입력)
+// 저장소 -> 쿠키에서 이름, 값은 다 넣으면 됨. 아래는 dvwa 내용으로 일단 넣어둠.
 {
     "target_url": "http://타겟IP:포트",
     "auth": {
