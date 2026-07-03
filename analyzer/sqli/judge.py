@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from urllib.parse import quote
 
-from .payloads import DB_ERROR_KEYWORDS
+from .payloads import DB_ERROR_KEYWORDS, UNION_ERROR_KEYWORDS
 
 # Time-based 기준
 SLEEP_THRESHOLD = 4.5
@@ -48,9 +48,11 @@ def _is_different(a: str, b: str, floor: float) -> bool:
 
 def judge_boolean_sqli(
     baseline_body: str,
-    and_true_body: str, and_false_body: str, or_true_body: str,
+    and_true_body: str, and_false_body: str,
+    or_true_body: str, or_false_body: str,
     base_value: str,
-    and_true_payload: str, and_false_payload: str, or_true_payload: str,
+    and_true_payload: str, and_false_payload: str,
+    or_true_payload: str, or_false_payload: str,
     base_ratio: float = 1.0,
 ) -> SqliVerdict:
     floor = _noise_floor(base_ratio)
@@ -59,25 +61,58 @@ def judge_boolean_sqli(
     and_true_clean  = _strip_value(and_true_body, and_true_payload)
     and_false_clean = _strip_value(and_false_body, and_false_payload)
     or_true_clean   = _strip_value(or_true_body, or_true_payload)
+    or_false_clean  = _strip_value(or_false_body, or_false_payload)
 
     # AND-true 게이트: baseline과 같아야 통과 (동적 콘텐츠도 허용)
     if _is_different(and_true_clean, base_clean, floor):
         return SqliVerdict(False, "", "AND-true가 baseline과 다름 — SQL 논리로 해석되지 않음 (안전)")
 
-    # 탐지 판정: baseline과 달라야 SQLi
+    # AND 패턴: AND-true==baseline, AND-false≠baseline
     if _is_different(and_false_clean, base_clean, floor):
         return SqliVerdict(
             True, "high",
             f"Boolean SQLi (AND 패턴): AND-true==baseline, AND-false는 다름 (floor={floor:.3f})"
         )
 
-    if _is_different(or_true_clean, base_clean, floor):
+    # OR 패턴: OR-true vs OR-false 직접 비교 (base_value=""일 때도 작동 — ZAP/sqlmap 방식)
+    # AND-false로 차이가 없었다는 건 base_value가 이미 "결과 없음" 상태였을 가능성 → medium
+    if _is_different(or_true_clean, or_false_clean, floor):
         return SqliVerdict(
-            True, "high",
-            f"Boolean SQLi (OR 패턴): AND만으론 차이 없었으나 OR-true에서 확장 확인됨 (floor={floor:.3f})"
+            True, "medium",
+            f"Boolean SQLi (OR 패턴): OR-true≠OR-false 직접 비교 확인됨 (floor={floor:.3f})"
         )
 
-    return SqliVerdict(False, "", "AND/OR 모두 baseline과 동일 — 안전")
+    return SqliVerdict(False, "", "AND/OR 모두 차이 없음 — 안전")
+
+
+def judge_union_sqli(baseline_body: str, attack_body: str) -> SqliVerdict:
+    base_lower   = (baseline_body or "").lower()
+    attack_lower = (attack_body or "").lower()
+    for kw in UNION_ERROR_KEYWORDS:
+        if kw in attack_lower and kw not in base_lower:
+            return SqliVerdict(True, "medium", f"UNION-based SQLi: 컬럼 수 불일치 에러 노출 ('{kw}')")
+    return SqliVerdict(False, "", "UNION 에러 시그니처 없음")
+
+
+def judge_expression_sqli(
+    baseline_body: str,
+    equiv_body: str,
+    nonequiv_body: str,
+    equiv_payload: str,
+    nonequiv_payload: str,
+    base_value: str,
+    base_ratio: float = 1.0,
+) -> SqliVerdict:
+    floor = _noise_floor(base_ratio)
+    base_clean     = _strip_value(baseline_body, base_value)
+    equiv_clean    = _strip_value(equiv_body, equiv_payload)
+    nonequiv_clean = _strip_value(nonequiv_body, nonequiv_payload)
+    if _is_same(equiv_clean, base_clean, floor) and _is_different(nonequiv_clean, base_clean, floor):
+        return SqliVerdict(
+            True, "medium",
+            f"Expression-based SQLi: 수식 평가 응답 차이 확인 (floor={floor:.3f})"
+        )
+    return SqliVerdict(False, "", "수식 평가 차이 없음")
 
 
 def judge_error_based_sqli(baseline_body: str, attack_body: str) -> SqliVerdict:
