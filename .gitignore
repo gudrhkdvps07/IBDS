@@ -27,3 +27,6 @@ debug-*.log
 
 # 인증서
 *.cer
+
+# 아직 커밋하면 안되는 파일
+attack_requests/

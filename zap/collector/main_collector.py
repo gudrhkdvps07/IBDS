@@ -103,9 +103,9 @@ def main():
 
     # 수집된 raw 메시지를 scan target으로 정규화
     targets = to_targets(messages)
-    targets_path = os.path.join(out_dir, "targets.json")
+    targets_path = os.path.join(out_dir, "scan_targets.json")
     save_json(targets_path, [t.to_dict() for t in targets])
-    print(f"[ZAP] targets.json -> {targets_path} ({len(targets)}건)")
+    print(f"[ZAP] scan_targets.json -> {targets_path} ({len(targets)}건)")
 
     meta_path = os.path.join(out_dir, "collection_meta.json")
     save_json(meta_path, ajax_meta)
