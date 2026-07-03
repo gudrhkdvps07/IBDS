@@ -20,7 +20,13 @@ z_checkset/
 CLAUDE.md
 results/
 test/
-
+test_example_src/
 
 # Debug logs
 debug-*.log
+
+# 인증서
+*.cer
+
+# 아직 커밋하면 안되는 파일
+attack_requests/
