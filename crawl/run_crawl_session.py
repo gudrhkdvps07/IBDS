@@ -52,6 +52,7 @@ def run_crawl_session(config_path: str | None = None, with_proxy: bool = True) -
 
     started_at = datetime.now(timezone.utc).isoformat()
     all_results: list[dict] = []
+    role_cookies: dict[str, dict] = {}
 
     for role, cookies in roles:
         if role == "member" and not cookies:
@@ -69,6 +70,7 @@ def run_crawl_session(config_path: str | None = None, with_proxy: bool = True) -
         for r in crawler.results:
             r.role = role
         all_results.extend(asdict(r) for r in crawler.results)
+        role_cookies[role] = dict(cookies) if cookies else {}
 
     output_file = os.path.join(session_dir, "crawl_result.json")
     with open(output_file, "w", encoding="utf-8") as f:
@@ -97,6 +99,7 @@ def run_crawl_session(config_path: str | None = None, with_proxy: bool = True) -
         },
         "started_at": started_at,
         "finished_at": finished_at,
+        "role_cookies": role_cookies,
     }
     meta_path = save_session_meta(session_dir, meta)
     print(f"[SESSION] meta → {meta_path}")

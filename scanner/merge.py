@@ -240,6 +240,7 @@ def _build_targets(
     form_index: dict[tuple, list],
     danger_urls: set[str],
     form_meta: dict[tuple, dict],
+    role_cookies: dict[str, dict] | None = None,
 ) -> list[dict]:
     targets: list[dict] = []
 
@@ -254,6 +255,9 @@ def _build_targets(
         if key in form_index:
             params = _merge_params(params, form_index[key])
             sources.append("crawl")
+            # crawl-only 타겟: proxy 레코드 없으므로 session_meta의 role_cookies 주입
+            if key not in proxy_groups and role_cookies:
+                cookies = dict(role_cookies.get(role, {}))
 
         if key in proxy_groups:
             seen_full_urls: set[str] = set()
@@ -309,10 +313,16 @@ def _build_targets(
 def merge(session_dir: Path) -> list[dict]:
     crawl_path = session_dir / "crawl_result.json"
     proxy_path = session_dir / "proxy_history_snapshot.jsonl"
+    meta_path = session_dir / "session_meta.json"
+
+    role_cookies: dict[str, dict] = {}
+    if meta_path.exists():
+        meta = load_json(str(meta_path), {})
+        role_cookies = meta.get("role_cookies", {})
 
     form_index, danger_urls, url_roles, form_meta = _load_crawl(crawl_path)
     proxy_groups = _load_proxy(proxy_path, url_roles)
-    return _build_targets(proxy_groups, form_index, danger_urls, form_meta)
+    return _build_targets(proxy_groups, form_index, danger_urls, form_meta, role_cookies)
 
 
 # results/sessions/ 하위 가장 최근 세션 디렉터리 반환
