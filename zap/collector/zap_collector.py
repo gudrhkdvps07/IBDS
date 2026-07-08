@@ -8,7 +8,6 @@ from utilities.file_utils import load_json
 
 SESSION_NAME = "IBDSSession"
 CONTEXT_NAME = "IBDSContext"
-_COOKIE_RULE_DESC = "ibds-cookie-inject"
 
 
 # ZAP 수집 인프라 래퍼 (세션/Context/Spider만 담당, Active Scan 없음)
@@ -26,16 +25,22 @@ class ZapCollector:
             api_key=cfg.get("api_key", "changeme"),
         )
 
-    # 이전 실행 기록이 섞이지 않도록 매 실행마다 세션 새로 생성
+    '''
+    # 세션 새로 생성 
     def new_session(self, name=SESSION_NAME):
         self.zap.core.new_session(name=name, overwrite=True)
         print(f"[ZAP] 세션 생성: {name}")
+    '''
 
-    # target origin(scheme+host+port) 밖 트래픽을 프록시 단에서 전역 제외, target_url에 path가 있어도 origin 기준 (범위 축소용, 위험 URL 필터링과는 별개)
+
+    # target origin(scheme+host+port) 밖 트래픽을 프록시 단에서 전역 제외 (범위 축소용, 위험 URL 필터링과는 별개)
+    # 매번 실행시 초기화됨.
     def restrict_to_target_domain(self, target_url: str):
         parts = urlsplit(target_url)
-        origin = f"{parts.scheme}://{parts.netloc}"
+        origin = f"{parts.scheme}://{parts.netloc}" # target_url에 path가 있어도 origin 기준
         regex = f"^(?:(?!{re.escape(origin)}).)*$"
+        self.zap.core.clear_excluded_from_proxy() # refresh
+        print(f"[ZAP] 전역 제외 초기화 완료")
         self.zap.core.exclude_from_proxy(regex=regex)
         print(f"[ZAP] 전역 제외(target 외부 origin): {regex}")
 
@@ -53,18 +58,23 @@ class ZapCollector:
             self.zap.context.exclude_from_context(contextname=name, regex=pattern)
         print(f"[ZAP] Context 위험 URL 제외 {len(patterns)}건 등록")
 
-    # 로그인 세션 쿠키를 target_url 범위 요청에만 주입 (Replacer 룰 url 스코프, 인증 Context 미사용)
-    def set_session_cookie(self, cookies: dict, target_url: str):
-        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-        self.zap.replacer.add_rule(
-            description=_COOKIE_RULE_DESC, enabled=True,
-            matchtype="REQ_HEADER", matchregex=False,
-            matchstring="Cookie", replacement=cookie_str,
-            url=f"{re.escape(target_url)}.*",
-        )
-
-    def clear_session_cookie(self):
-        self.zap.replacer.remove_rule(description=_COOKIE_RULE_DESC)
+    # 프록시가 캡처한 기존 세션 활성화, 없으면 anonymous로 진행
+    def capture_session(self, target_url: str):
+        parts = urlsplit(target_url)
+        site = parts.netloc
+        cap_sess = self.zap.httpsessions.sessions(site) 
+        if len(cap_sess) != 0 :
+            fst_sess_name = cap_sess[0]['session'][0] # 가장 최근 세션
+            print(f"fst_sess_name: {fst_sess_name}")  # 세션 이름 확인
+            print(f"fst_sess_value: {cap_sess[0]['session'][1]['PHPSESSID']['value']}")
+            try :
+                sess = {}
+                sess = self.zap.httpsessions.set_active_session(site, fst_sess_name)
+                print(f"[ZAP] 현재 세션 잡기 성공 : {sess}")
+            except Exception as e:
+                print(f"[ZAP] 세션 이름이 틀렸거나 site가 잡혀있지 않습니다. :{e}")
+        else : 
+            print("[ZAP] 설정된 세션이 없습니다. anonymous로 진행합니다.")
 
     # ZAP 사이트 트리에 target 직접 접근 등록 (Spider 시작 전 준비)
     def access_target(self, target_url: str):
