@@ -30,3 +30,4 @@ debug-*.log
 
 # 아직 커밋하면 안되는 파일
 attack_requests/
+attack_request_list.json
