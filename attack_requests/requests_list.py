@@ -41,7 +41,7 @@ def _sqli_error_rule() -> AttackRule:
             "elapsed_ms",
             "db_error_signature",
         ],
-        target_hint={"parameter_types": ["query", "form"], "single_parameter_only": True},
+        target_hint={"parameter_types": ["query", "body"], "single_parameter_only": True},
     )
 
 
@@ -73,7 +73,7 @@ def _sqli_boolean_rule() -> AttackRule:
             "redirect_location",
             "elapsed_ms",
         ],
-        target_hint={"parameter_types": ["query", "form"], "single_parameter_only": True},
+        target_hint={"parameter_types": ["query", "body"], "single_parameter_only": True},
     )
 
 
@@ -108,7 +108,7 @@ def _sqli_time_rule(delay_seconds: int) -> AttackRule:
             "elapsed_ms",
             "timeout",
         ],
-        target_hint={"parameter_types": ["query", "form"], "single_parameter_only": True},
+        target_hint={"parameter_types": ["query", "body"], "single_parameter_only": True},
     )
 
 
@@ -137,7 +137,7 @@ def _sqli_order_by_rule(max_order_by: int) -> AttackRule:
             "db_error_signature",
         ],
         target_hint={
-            "parameter_types": ["query", "form"],
+            "parameter_types": ["query", "body"],
             "single_parameter_only": True,
             "max_order_by": max_order_by,
         },
@@ -161,7 +161,7 @@ def _xss_reflection_rule() -> AttackRule:
             "reflected_token",
             "reflection_locations",
         ],
-        target_hint={"parameter_types": ["query", "form"], "single_parameter_only": True},
+        target_hint={"parameter_types": ["query", "body"], "single_parameter_only": True},
     )
 
 
@@ -183,7 +183,7 @@ def _xss_escape_rule() -> AttackRule:
             "encoded_reflection",
             "escaped_chars",
         ],
-        target_hint={"parameter_types": ["query", "form"], "single_parameter_only": True},
+        target_hint={"parameter_types": ["query", "body"], "single_parameter_only": True},
     )
 
 
@@ -205,7 +205,7 @@ def _xss_context_rule() -> AttackRule:
             "tag_name",
             "attribute_name",
         ],
-        target_hint={"parameter_types": ["query", "form"], "single_parameter_only": True},
+        target_hint={"parameter_types": ["query", "body"], "single_parameter_only": True},
     )
 
 
