@@ -52,6 +52,7 @@ def main():
         collector = ZapCollector.from_config(_ZAP_CONFIG)
         print(f"[ZAP] 버전: {collector.zap.core.version}")
 
+        collector.new_session()
         collector.restrict_to_target_domain(target_url)
         collector.setup_context(target_url)
         collector.exclude_danger_urls(danger_patterns)  # Spider 실행 전 필수 등록
