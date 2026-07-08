@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
-from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -14,9 +13,6 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.stdout.reconfigure(encoding="utf-8")
 
-from crawl.run_crawl_session import run_crawl_session
-from scanner.merge import merge
-from authentication.auth import get_demo_dvwa_cookies
 from utilities.file_utils import save_json
 from .sqli.payloads import (
     BOOLEAN_STRING_AND,
@@ -80,40 +76,29 @@ class Candidate:
     target_param: str
     base_value: str
     other_params: dict = field(default_factory=dict)
+    cookies: dict = field(default_factory=dict)
 
 
 def load_candidates(scan_targets: list[dict]) -> list[Candidate]:
     candidates: list[Candidate] = []
 
     for target in scan_targets:
-        if not target.get("can_scan", True):
-            continue
-
         method = target.get("method", "GET").upper()
         base_url = target.get("base_url", "")
-        parameters = target.get("parameters", [])
+        params = target.get("params", {})
+        scannable = target.get("scannable_params", list(params.keys()))
+        cookies = target.get("cookies", {})
 
-        # 파라미터 이름 → 대표값 매핑 (request context용)
-        all_values = {
-            p["name"]: (p["sample_values"][0] if p.get("sample_values") else "")
-            for p in parameters
-            if p.get("name")
-        }
-
-        for param in parameters:
-            if not param.get("scan", True):
-                continue
-            name = param.get("name", "")
-            if not name:
-                continue
-            base_value = param["sample_values"][0] if param.get("sample_values") else ""
-            other = {k: v for k, v in all_values.items() if k != name}
+        for name in scannable:
+            base_value = params.get(name, "")
+            other = {k: v for k, v in params.items() if k != name}
             candidates.append(Candidate(
                 method=method,
                 base_url=base_url,
                 target_param=name,
                 base_value=base_value,
                 other_params=other,
+                cookies=cookies,
             ))
 
     return candidates
@@ -167,10 +152,10 @@ def _to_finding(c: Candidate, request_id: str, vuln_type: str, category: str, pa
     }
 
 
-def _scan_sqli(c: Candidate, request_id: str, scan_cookies: dict) -> list[dict]:
+def _scan_sqli(c: Candidate, request_id: str) -> list[dict]:
     findings: list[dict] = []
     session = requests.Session()
-    session.cookies.update(scan_cookies)
+    session.cookies.update(c.cookies)
     fresh_other = _refresh_csrf_tokens(session, c) if c.method == "POST" else c.other_params
 
     def p(value: str) -> dict:
@@ -273,10 +258,10 @@ def _scan_sqli(c: Candidate, request_id: str, scan_cookies: dict) -> list[dict]:
     return findings
 
 
-def _scan_xss(c: Candidate, request_id: str, scan_cookies: dict) -> list[dict]:
+def _scan_xss(c: Candidate, request_id: str) -> list[dict]:
     findings: list[dict] = []
     session = requests.Session()
-    session.cookies.update(scan_cookies)
+    session.cookies.update(c.cookies)
 
     if c.method == "POST":
         # Stored XSS: baseline GET 먼저 — 이미 저장된 payload와 구분
@@ -303,52 +288,32 @@ def _scan_xss(c: Candidate, request_id: str, scan_cookies: dict) -> list[dict]:
     return findings
 
 
-def scan_candidate(c: Candidate, request_id: str, scan_cookies: dict) -> list[dict]:
+def scan_candidate(c: Candidate, request_id: str) -> list[dict]:
     findings: list[dict] = []
-    findings.extend(_scan_sqli(c, request_id, scan_cookies))
-    findings.extend(_scan_xss(c, request_id, scan_cookies))
+    findings.extend(_scan_sqli(c, request_id))
+    findings.extend(_scan_xss(c, request_id))
     return findings
-
-# DEMO_DVWA_AUTH=1 전용. 크롤 후 켜진 PHPIDS를 스캔 전에 끔.
-def _demo_dvwa_setup(scan_cookies: dict) -> None:
-    base = os.getenv("TARGET_URL", "http://localhost:8080").rstrip("/")
-    try:
-        s = requests.Session()
-        s.cookies.update(scan_cookies)
-        s.get(f"{base}/security.php?phpids=off", timeout=TIMEOUT)
-        print("[demo] PHPIDS 비활성화")
-    except Exception:
-        pass
 
 
 def main() -> None:
-    if len(sys.argv) > 1:
-        targets_path = sys.argv[1]
-        print(f"[analyzer] 기존 run 재사용: {targets_path}")
-        with open(targets_path, encoding="utf-8") as f:
-            scan_targets = json.load(f)
-        session_dir = os.path.dirname(os.path.abspath(targets_path))
-    else:
-        demo_cookies = get_demo_dvwa_cookies() or None
-        session_info = run_crawl_session(override_auth_cookies=demo_cookies)
-        session_dir = session_info["session_dir"]
-        scan_targets = merge(Path(session_dir))
-        save_json(os.path.join(session_dir, "scan_targets.json"), scan_targets)
-        print(f"[analyzer] 크롤 + 병합 완료: {session_dir}")
+    if len(sys.argv) < 2:
+        print("[analyzer] 사용법: python -m analyzer.scan <scan_targets.json 경로>", file=sys.stderr)
+        sys.exit(1)
+
+    targets_path = sys.argv[1]
+    with open(targets_path, encoding="utf-8") as f:
+        scan_targets = json.load(f)
+    session_dir = os.path.dirname(os.path.abspath(targets_path))
 
     candidates = load_candidates(scan_targets)
     print(f"[analyzer] {len(candidates)}개 후보 파라미터")
-
-    scan_cookies = get_demo_dvwa_cookies()
-    if scan_cookies:
-        _demo_dvwa_setup(scan_cookies)
 
     all_findings: list[dict] = []
     for i, c in enumerate(candidates, 1):
         request_id = f"req-{i:03d}"
         print(f"[{i}/{len(candidates)}] {c.method} {c.base_url} param={c.target_param}")
         try:
-            findings = scan_candidate(c, request_id, scan_cookies)
+            findings = scan_candidate(c, request_id)
         except Exception as exc:
             print(f"  [ERROR] {exc}")
             continue

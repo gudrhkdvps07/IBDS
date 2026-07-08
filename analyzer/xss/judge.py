@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+_SCRIPT_TAG_RE    = re.compile(r'<script[\s>/]', re.IGNORECASE)
+_EVENT_HANDLER_RE = re.compile(r'\bon\w+\s*=', re.IGNORECASE)
 
 
 @dataclass
@@ -12,8 +16,17 @@ class XssVerdict:
 
 def judge_xss(response_body: str, payload: str) -> XssVerdict:
     body = response_body or ""
-    # payload가 HTML 이스케이프 없이 그대로 반사되면 XSS
-    # 이스케이프된 경우(&lt;script&gt;)는 payload의 '<'와 달라서 매칭 안 됨
-    if payload.lower() in body.lower():
-        return XssVerdict(True, "high", f"XSS: payload가 응답에 비이스케이프 상태로 반사됨")
+
+    # payload 그대로 반사 (< > 이스케이프 없음) → HIGH
+    if payload in body:
+        return XssVerdict(True, "high", "XSS: payload가 비이스케이프 상태로 그대로 반사됨")
+
+    # alert(1)은 반사됐지만 태그가 부분적으로 이스케이프된 경우
+    if "alert(1)" in body:
+        # 실행 가능한 태그/이벤트핸들러가 살아있으면 HIGH
+        if _SCRIPT_TAG_RE.search(body) or _EVENT_HANDLER_RE.search(body):
+            return XssVerdict(True, "high", "XSS: 실행 가능한 태그/이벤트핸들러와 함께 반사됨")
+        # alert(1)만 반사, 태그는 없음 → JS 컨텍스트 가능성
+        return XssVerdict(True, "medium", "XSS: alert(1) 반사됨 — JS 컨텍스트 수동 확인 필요")
+
     return XssVerdict(False, "", "XSS payload 반사 없음")
