@@ -43,7 +43,6 @@ def main():
         print("[ERROR] target_config.json에 target_url이 없습니다.", file=sys.stderr)
         sys.exit(1)
 
-    cookies = (target_cfg.get("auth") or {}).get("cookies", {})  # session 방식 auth만 지원
     danger_patterns = _load_danger_patterns(_DANGER_URL_FILE)
 
     out_dir = os.path.join(_PROJECT_ROOT, "results", datetime.now().strftime("collection_%Y%m%d_%H%M%S"))
@@ -53,16 +52,12 @@ def main():
         collector = ZapCollector.from_config(_ZAP_CONFIG)
         print(f"[ZAP] 버전: {collector.zap.core.version}")
 
-        collector.new_session()
         collector.restrict_to_target_domain(target_url)
         collector.setup_context(target_url)
         collector.exclude_danger_urls(danger_patterns)  # Spider 실행 전 필수 등록
 
-        if cookies:
-            collector.set_session_cookie(cookies, target_url)
-            print(f"[ZAP] 세션 쿠키 주입: {', '.join(cookies)}")
-
         collector.access_target(target_url)
+        collector.capture_session(target_url) # 현재 세션 그대로 가져오기
 
         print(f"[COLLECT] Spider 시작: {target_url}")
         collector.run_spider(target_url)
@@ -81,8 +76,6 @@ def main():
             ajax_meta["ajax_spider_completed"] = result["completed"]
             ajax_meta["ajax_spider_elapsed_seconds"] = result["elapsed_seconds"]
 
-        if cookies:
-            collector.clear_session_cookie()
 
         sample = collector.get_messages_sample(target_url, count=3)
         print("[ZAP] raw 메시지 샘플 (3건):")
