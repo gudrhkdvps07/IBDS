@@ -12,7 +12,7 @@ class AttackRule:
     vuln_type: str
     technique: str
     sequence: list[str]
-    payload_templates: dict[str, list[str]]
+    payload_sets: dict[str, list[str]]
     evidence_required: list[str]
     target_hint: dict[str, Any] = field(default_factory=dict)
 
@@ -51,19 +51,26 @@ def _sqli_boolean_rule() -> AttackRule:
         vuln_type="sqli",
         technique="boolean",
         sequence=["baseline", "boolean_true", "boolean_false"],
-        payload_templates={
-            "baseline": ["{value}"],
-            "boolean_true": [
-                "{value}' AND '1'='1",
-                "{value}\" AND \"1\"=\"1",
-                "{value} AND 1=1",
-            ],
-            "boolean_false": [
-                "{value}' AND '1'='2",
-                "{value}\" AND \"1\"=\"2",
-                "{value} AND 1=2",
-            ],
-        },
+        payload_sets=[
+            {
+                "set_id": "single_quote",
+                "baseline": "{value}",
+                "boolean_true": "{value}' AND '1'='1",
+                "boolean_false": "{value}' AND '1'='2",
+            },
+            {
+                "set_id": "double_quote",
+                "baseline": "{value}",
+                "boolean_true": "{value}\" AND \"1\"=\"1",
+                "boolean_false": "{value}\" AND \"1\"=\"2",
+            },
+            {
+                "set_id": "numeric",
+                "baseline": "{value}",
+                "boolean_true": "{value} AND 1=1",
+                "boolean_false": "{value} AND 1=2",
+            },
+        ],
         evidence_required=[
             "status_code",
             "body_length",
