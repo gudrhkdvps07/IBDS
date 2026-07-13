@@ -5,12 +5,13 @@ from datetime import datetime
 from pprint import pprint
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(_THIS_DIR))
-sys.path.insert(0, _PROJECT_ROOT)  # utilities/ 등 프로젝트 루트 패키지 import용
+_SRC_ROOT = os.path.dirname(os.path.dirname(_THIS_DIR))  # src/
+_PROJECT_ROOT = os.path.dirname(_SRC_ROOT)  # 리포 루트, config/results 등 src 밖 경로용
+sys.path.insert(0, _SRC_ROOT)  # utilities/scan/zap 등 src 루트 패키지 import용
 
 from utilities.file_utils import load_json, save_json, normalize_base_url
 from zap.collector.zap_collector import ZapCollector
-from scan.importer import to_targets
+from scan.normalize.importer import to_targets
 
 _ZAP_CONFIG = os.path.join(_PROJECT_ROOT, "config", "zap_config.json")
 _TARGET_CONFIG = os.path.join(_PROJECT_ROOT, "config", "target_config.json")
