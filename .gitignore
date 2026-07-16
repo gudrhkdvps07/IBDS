@@ -20,7 +20,7 @@ results/
 # 테스트용
 CLAUDE.md
 test/
-test_example_src/
+reference/
 
 # 인증서
 *.cer

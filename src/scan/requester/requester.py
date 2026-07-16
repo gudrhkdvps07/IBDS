@@ -3,17 +3,67 @@ from urllib.parse import urlparse
 from scan.normalize.importer import _parse_response_status, _parse_headers_block
 from scan.normalize.target import RequestTarget
 
+# site(origin)별 최신 쿠키 저장소, target이 아닌 origin 단위 공유
+_cookie_store: dict[str, dict[str, str]] = {}
 
-# RequestTarget -> raw HTTP 요청 텍스트 재조립 (요청줄 + 헤더 + Cookie + 바디)
-def _build_raw_request(target: RequestTarget) -> str:
+
+# 쿠키 저장소 초기화, 스캔 시작 시 1회 호출
+def clear_cookie_store() -> None:
+    _cookie_store.clear()
+
+
+# URL에서 "scheme://netloc" 추출, http/https 구분용
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"Invalid absolute URL: {url}")
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+# target origin의 현재 쿠키 조회, 최초 접근 시 수집 당시 쿠키로 초기화
+def _get_cookies(target: RequestTarget) -> dict[str, str]:
+    origin = _origin(target.url)
+    stored = _cookie_store.setdefault(origin, {})
+    for name, value in target.cookies.items():  # 이미 갱신된 값은 덮어쓰지 않음
+        stored.setdefault(name, value)
+    return dict(stored)  # 내부 dict 참조 노출 방지
+
+
+# 응답 원문에서 Set-Cookie 라인 추출, dict 변환 시 동일 이름 헤더 유실 방지
+def _iter_set_cookie_values(response_header: str):
+    for line in response_header.splitlines():
+        name, sep, value = line.partition(":")
+        if sep and name.strip().lower() == "set-cookie":
+            yield value.strip()
+
+
+# 응답의 Set-Cookie를 저장소에 반영, 빈 값은 삭제 지시
+def _update_cookies_from_response(origin: str, response_header: str) -> None:
+    stored = _cookie_store.setdefault(origin, {})
+    for set_cookie in _iter_set_cookie_values(response_header):
+        cookie_pair = set_cookie.split(";", 1)[0].strip()  # Path/Expires 등 속성 제외
+        if "=" not in cookie_pair:
+            continue
+        name, value = cookie_pair.split("=", 1)
+        name, value = name.strip(), value.strip()
+        if not name:
+            continue
+        if value:
+            stored[name] = value
+        else:
+            stored.pop(name, None)
+
+
+# RequestTarget + cookies -> raw HTTP 요청 텍스트 재조립
+def _build_raw_request(target: RequestTarget, cookies: dict[str, str]) -> str:
     parsed = urlparse(target.url)
     path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
 
     lines = [f"{target.method} {path} HTTP/1.1"]
     for k, v in target.headers.items():
         lines.append(f"{k}: {v}")
-    if target.cookies:  # importer가 헤더에서 빼놓은 cookie, Cookie 헤더로 재조립
-        cookie_str = "; ".join(f"{k}={v}" for k, v in target.cookies.items())
+    if cookies:  # importer가 헤더에서 빼놓은 cookie, Cookie 헤더로 재조립
+        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
         lines.append(f"Cookie: {cookie_str}")
 
     request_text = "\r\n".join(lines) + "\r\n\r\n"
@@ -22,16 +72,22 @@ def _build_raw_request(target: RequestTarget) -> str:
     return request_text
 
 
-# target을 그대로 전송, 응답 dict 리턴 (zap_message_id로 그룹 연결)
-# send_request()는 list[dict] 형태로 리턴, dict는 importer.py가 다루는 raw ZAP 메시지와 동일한 구조
+# target을 현재 쿠키로 전송, 응답의 Set-Cookie 반영 후 결과 dict 리턴
 def send(target: RequestTarget, zap) -> dict:
-    raw_request = _build_raw_request(target)
+    origin = _origin(target.url)
+    cookies = _get_cookies(target)
+    raw_request = _build_raw_request(target, cookies)
     result = zap.core.send_request(request=raw_request, followredirects=False)
+    if not result:  # 외부 API 호출 경계, 빈 응답 방어
+        raise RuntimeError("ZAP send_request returned no messages")
     msg = result[0]
+    response_header = msg.get("responseHeader", "")
+
+    _update_cookies_from_response(origin, response_header)  # 다음 요청부터 갱신된 쿠키 사용
 
     return {
         "zap_message_id": target.zap_message_id,
-        "response_status": _parse_response_status(msg.get("responseHeader", "")),
-        "response_headers": _parse_headers_block(msg.get("responseHeader", "")),
+        "response_status": _parse_response_status(response_header),
+        "response_headers": _parse_headers_block(response_header),
         "response_body": msg.get("responseBody", ""),
     }
