@@ -63,19 +63,18 @@ def judge_boolean_sqli(
     or_true_clean   = _strip_value(or_true_body, or_true_payload)
     or_false_clean  = _strip_value(or_false_body, or_false_payload)
 
-    # AND-true 게이트: baseline과 같아야 통과 (동적 콘텐츠도 허용)
+    # AND-true 게이트
     if _is_different(and_true_clean, base_clean, floor):
         return SqliVerdict(False, "", "AND-true가 baseline과 다름 — SQL 논리로 해석되지 않음 (안전)")
 
-    # AND 패턴: AND-true==baseline, AND-false≠baseline
+    # AND 패턴
     if _is_different(and_false_clean, base_clean, floor):
         return SqliVerdict(
             True, "high",
             f"Boolean SQLi (AND 패턴): AND-true==baseline, AND-false는 다름 (floor={floor:.3f})"
         )
 
-    # OR 패턴: OR-true vs OR-false 직접 비교 (base_value=""일 때도 작동 — ZAP/sqlmap 방식)
-    # AND-false로 차이가 없었다는 건 base_value가 이미 "결과 없음" 상태였을 가능성 → medium
+    # OR-true vs OR-false 직접 비교
     if _is_different(or_true_clean, or_false_clean, floor):
         return SqliVerdict(
             True, "medium",

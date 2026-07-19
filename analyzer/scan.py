@@ -45,9 +45,8 @@ CSRF_RE = re.compile(r"(csrf|token|nonce|_token|authenticity|captcha)", re.IGNOR
 TIMEOUT = 10
 TIME_BASED_REPEAT = 2
 
-# ORDER BY 컨텍스트로 판단할 파라미터 이름 키워드
 _ORDERBY_KEYWORDS = {"sort", "order", "orderby", "sortby", "col", "column", "dir", "direction"}
-# 로그인 폼 파라미터 키워드 — boolean auth bypass 제외, error/time만 시도
+
 _LOGIN_KEYWORDS   = {"username", "password", "user", "pass", "email", "login", "passwd", "pwd"}
 
 
@@ -167,7 +166,7 @@ def _scan_sqli(c: Candidate, request_id: str) -> list[dict]:
     b2_clean = _strip_value(baseline2_body, c.base_value)
     base_ratio = SequenceMatcher(None, b1_clean, b2_clean).ratio()
 
-    # ORDER BY 컨텍스트: sort/order 류 파라미터는 CASE WHEN 방식으로 별도 탐지
+
     if _is_orderby_param(c.target_param):
         ob_true_payload  = render(BOOLEAN_ORDERBY["true_payload"],  c.base_value)
         ob_false_payload = render(BOOLEAN_ORDERBY["false_payload"], c.base_value)
@@ -221,7 +220,7 @@ def _scan_sqli(c: Candidate, request_id: str) -> list[dict]:
             findings.append(_to_finding(c, request_id, "sqli", "error_based", payload, verdict.confidence, verdict.evidence))
             break
 
-    # UNION-based: 컬럼 수 불일치 에러 탐지
+    # UNION-based
     for up in UNION_PAYLOADS:
         payload = render(up, c.base_value)
         attack_body, _ = _send(c.method, c.base_url, p(payload), session)
@@ -230,7 +229,7 @@ def _scan_sqli(c: Candidate, request_id: str) -> list[dict]:
             findings.append(_to_finding(c, request_id, "sqli", "union", payload, verdict.confidence, verdict.evidence))
             break
 
-    # Expression-based: 숫자 파라미터에서 수식 평가 여부 탐지
+    # Expression-based
     if _is_numeric(c.base_value):
         n = int(c.base_value)
         equiv_payload    = f"{n + 1}-1"
@@ -264,7 +263,7 @@ def _scan_xss(c: Candidate, request_id: str) -> list[dict]:
     session.cookies.update(c.cookies)
 
     if c.method == "POST":
-        # Stored XSS: baseline GET 먼저 — 이미 저장된 payload와 구분
+        # Stored XSS
         baseline_get, _ = _send("GET", c.base_url, {}, session)
         for payload in XSS_PAYLOADS:
             fresh_other = _refresh_csrf_tokens(session, c)
