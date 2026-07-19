@@ -198,3 +198,4 @@ if __name__ == "__main__":
     t_path = Path(sys.argv[1]) if len(sys.argv) > 1 else SESSION_DIR / "scan_targets.json"
     r_path = Path(sys.argv[2]) if len(sys.argv) > 2 else RULES_PATH
     run(t_path, r_path)
+
