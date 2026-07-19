@@ -5,18 +5,19 @@ from datetime import datetime
 from pprint import pprint
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(_THIS_DIR))
-sys.path.insert(0, _PROJECT_ROOT)  # utilities/ 등 프로젝트 루트 패키지 import용
+_SRC_ROOT = os.path.dirname(_THIS_DIR)  # src/
+_PROJECT_ROOT = os.path.dirname(_SRC_ROOT)  # 리포 루트, src 밖 경로용
+sys.path.insert(0, _SRC_ROOT)  # src 루트 패키지 import용
 
 from utilities.file_utils import load_json, save_json, normalize_base_url
-from zap.collector.zap_collector import ZapCollector
-from scan.importer import to_targets
+from collector.zap_collector import ZapCollector
+from scan.normalize.importer import to_targets
 
 _ZAP_CONFIG = os.path.join(_PROJECT_ROOT, "config", "zap_config.json")
 _TARGET_CONFIG = os.path.join(_PROJECT_ROOT, "config", "target_config.json")
-_DANGER_URL_FILE = os.path.join(_PROJECT_ROOT, "config", "spider_exclude.txt")
+_DANGER_URL_FILE = os.path.join(_THIS_DIR, "spider_exclude.txt")
 
-_DEFAULT_AJAX_TIMEOUT = 300  # 초, MVP 기본값 (ZAP 자체 MaxDuration 60분보다 짧게)
+_DEFAULT_AJAX_TIMEOUT = 300  # Ajax spider timeout을 초 단위로 짧게 잡음. (ZAP 자체 제한시간은 60분)
 
 
 # Ajax Spider는 SPA/JS-heavy 사이트 대응용 선택 옵션, 기본은 Spider only
