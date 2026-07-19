@@ -2,7 +2,7 @@ import re
 import time
 from urllib.parse import urlsplit
 
-from zapv2 import ZAPv2
+from zapv2 import ZAPv2  # type: ignore
 
 from utilities.file_utils import load_json
 
