@@ -64,18 +64,41 @@ class BuildAttackRequestListTests(unittest.TestCase):
             }
             self.assertEqual(actual_payloads, expected_payloads)
 
-    def test_xss_requests_contain_attack_syntax_and_token(self) -> None:
+    def test_xss_requests_cover_multiple_contexts(self) -> None:
         requests = build_attack_request_list(include_sqli=False)
+        set_ids = [request["set_id"] for request in requests]
 
-        self.assertEqual(len(requests), 6)
-        self.assertTrue(
-            all(request["set_id"].startswith("XSS_reflected_") for request in requests)
-        )
+        self.assertEqual(len(requests), 16)
+        self.assertTrue(any(set_id.startswith("XSS_script_") for set_id in set_ids))
+        self.assertTrue(any(set_id.startswith("XSS_event_handler_") for set_id in set_ids))
+        self.assertTrue(any(set_id.startswith("XSS_attribute_breakout_") for set_id in set_ids))
+        self.assertTrue(any(set_id.startswith("XSS_url_context_") for set_id in set_ids))
+        self.assertTrue(any(set_id.startswith("XSS_escape_probe_") for set_id in set_ids))
         self.assertTrue(all("{token}" in request["payload"] for request in requests))
+
+    def test_xss_requests_contain_attack_syntax(self) -> None:
+        requests = build_attack_request_list(include_sqli=False)
+        executable_requests = [
+            request
+            for request in requests
+            if not request["set_id"].startswith("XSS_escape_probe_")
+        ]
+
         self.assertTrue(
             all(
-                any(marker in request["payload"].lower() for marker in ("<script", "onerror", "onload", "onmouseover"))
-                for request in requests
+                any(
+                    marker in request["payload"].lower()
+                    for marker in (
+                        "<script",
+                        "onerror",
+                        "onload",
+                        "onmouseover",
+                        "ontoggle",
+                        "javascript:",
+                        "data:text/html",
+                    )
+                )
+                for request in executable_requests
             )
         )
 

