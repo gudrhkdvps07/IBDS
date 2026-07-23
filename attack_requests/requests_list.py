@@ -57,7 +57,7 @@ def _sqli_boolean_requests() -> list[AttackRequest]:
 
 
 def _sqli_time_delay_requests(delay_seconds: int) -> list[AttackRequest]:
-
+ 
     payloads = [
         f"{{value}}' AND SLEEP({delay_seconds})-- ",
         f'{{value}}" AND SLEEP({delay_seconds})-- ',
@@ -124,7 +124,6 @@ def _xss_url_context_requests() -> list[AttackRequest]:
 
 
 def _xss_escape_probe_requests() -> list[AttackRequest]:
-
 
     payloads = [
         'IBDS_XSS_ESC_{token}<>"\'&',
