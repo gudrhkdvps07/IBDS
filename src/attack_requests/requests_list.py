@@ -70,7 +70,7 @@ RULES: list[dict] = [
         "technique": "reflected",
         "sequence": ["baseline", "reflected_attack"],
         "payload_templates": {
-            # ponytail: {token}은 variant._expand_payloads가 아직 빈 문자열로 고정 치환함,
+            # {token}은 variant._expand_payloads가 아직 빈 문자열로 고정 치환함,
             # 요청별 고유 마커 필요해지면 그때 토큰 발급 로직 연결
             "reflected_attack": [
                 "<script>alert('{token}')</script>",
