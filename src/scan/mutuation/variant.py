@@ -7,30 +7,10 @@ HTTP 전송 없음. 파라미터 하나씩 페이로드로 교체한 family(base
 from __future__ import annotations
 
 import json
-import re
 import urllib.parse
 from pathlib import Path
 
-_CONTROL_ACTION_WORDS = frozenset({
-    "submit", "login", "search", "change", "update", "delete",
-    "create", "register", "logout", "reset", "cancel", "sign",
-    "upload", "clear", "add", "remove",
-})
-_HEX_TOKEN_RE = re.compile(r'^[0-9a-fA-F]{16,}$')
-
-
-def _is_control_param(name: str, value: str) -> bool:
-    v = (value or "").strip().lower()
-    if not v:
-        return False
-    if v == (name or "").strip().lower():
-        return True
-    words = set(v.replace("+", " ").split())
-    return bool(words & _CONTROL_ACTION_WORDS)
-
-
-def _is_security_token(value: str) -> bool:
-    return bool(_HEX_TOKEN_RE.match((value or "").strip()))
+from .scan_point import _is_control_param, _is_security_token
 
 
 def _mutate_query(url: str, param_name: str, new_value: str) -> str:

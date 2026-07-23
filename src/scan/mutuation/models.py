@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 
 @dataclass
-class RequestTarget:
+class TargetBowl:
     """scan_targets.json 한 줄을 통째로 담는 그릇. 어떤 파라미터를 공격할지는 모름."""
     target_id: str           # 타겟 식별자 (t0, t1, ...) — 1번이 인덱스로 생성
     method: str              # HTTP 메서드 ("GET" or "POST")
@@ -21,7 +21,7 @@ class ScanPoint:
     """RequestTarget에서 공격 대상 파라미터를 하나씩 분리한 것. 1번이 파라미터당 하나씩 생성."""
     target_id: str       # 어느 RequestTarget에서 나왔는지 연결하는 키
     name: str            # 파라미터 이름 (예: "id", "username")
-    location: str        # 파라미터 위치 ("query" or "body")
+    location: str        # 파라미터 위치 ("query", "form", "json")
     original_value: str  # 파라미터 원본값 — payload 템플릿의 {value} 자리에 들어감
     value_type: str      # 값 타입 ("string" or "number") — 2번이 룰 매칭 시 사용
 
