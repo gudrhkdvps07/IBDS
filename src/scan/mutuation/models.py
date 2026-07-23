@@ -1,19 +1,5 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
-
-
-@dataclass
-class TargetBowl:
-    """scan_targets.json 한 줄을 통째로 담는 그릇. 어떤 파라미터를 공격할지는 모름."""
-    target_id: str           # 타겟 식별자 (t0, t1, ...) — 1번이 인덱스로 생성
-    method: str              # HTTP 메서드 ("GET" or "POST")
-    url: str                 # 쿼리 포함 전체 URL
-    base_url: str            # 쿼리 없는 URL — POST form mutation 시 사용
-    headers: dict[str, str]  # 요청 헤더
-    cookies: dict[str, str]  # 쿠키
-    body: str                # 원본 요청 바디 (scan_targets.json의 request_body)
-    param_location: str      # 파라미터 위치 ("query" or "body")
 
 
 @dataclass
