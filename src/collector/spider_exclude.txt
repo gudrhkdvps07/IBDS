@@ -26,3 +26,6 @@
 
 # 파괴적 액션 파라미터 (action= / cmd= / op= 기준)
 .*[?&](action|cmd|op)=(delete|remove|destroy|drop|reset|purge|flush|truncate|wipe|clear)(&.*)?$
+
+# DVWA IDS(PHPIDS) 설정 토글, Spider가 크롤링 중 IDS를 켜고 끄는 것 방지 (완전 일치)
+.*/security\.php\?phpids=(on|off)$

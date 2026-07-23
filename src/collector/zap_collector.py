@@ -2,7 +2,7 @@ import re
 import time
 from urllib.parse import urlsplit
 
-from zapv2 import ZAPv2
+from zapv2 import ZAPv2  # type: ignore
 
 from utilities.file_utils import load_json
 
@@ -55,7 +55,10 @@ class ZapCollector:
     # logout/reset/delete 등 위험 URL을 Context에서 제외, Spider 실행 전 필수 호출
     def exclude_danger_urls(self, patterns: list[str], name=CONTEXT_NAME):
         for pattern in patterns:
-            self.zap.context.exclude_from_context(contextname=name, regex=pattern)
+            self.zap.spider.exclude_from_scan(pattern)
+            """
+            # TODO: ajax Spider는 URL 정규식이 아니라 클릭할 엘리먼트(a 태그 href) 단위로 제외 등록해야함. 나중에 쓸때 추가
+            self.zap.ajaxSpider.add_excluded_element()"""
         print(f"[ZAP] Context 위험 URL 제외 {len(patterns)}건 등록")
 
     # 프록시가 캡처한 기존 세션 활성화, 없으면 anonymous로 진행

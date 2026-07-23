@@ -1,6 +1,6 @@
 import re
 from urllib.parse import urlparse, parse_qs
-from scan.target import RequestTarget
+from scan.normalize.target import RequestTarget
 
 # 정적 파일 확장자
 _STATIC_EXT = re.compile(
