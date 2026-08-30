@@ -135,6 +135,13 @@ def generate_stored_xss_families(sp: ScanPoint, target: dict) -> list[RequestFam
     return build_families_for_point(sp, target, rules)
 
 
+# CRLF Injection(응답 분할) -> XSS, discovery 없이 PL-XSS-CRLF 룰만 적용
+# 헤더로 반사되는 파라미터는 discovery.probe_reflected(body만 확인)로는 감지 불가해 게이팅을 우회함
+def generate_crlf_families(sp: ScanPoint, target: dict) -> list[RequestFamily]:
+    rules = [r for r in get_rules() if r.vuln_type == "xss" and r.technique == "crlf_response_split"]
+    return build_families_for_point(sp, target, rules)
+
+
 # SQLi
 def generate_sqli_families(
     sp: ScanPoint, target: dict, dynamic_markers: list[tuple[str, str]] | None = None,

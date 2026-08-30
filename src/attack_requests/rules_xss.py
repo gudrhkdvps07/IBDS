@@ -242,6 +242,19 @@ XSS_RULES: list[dict] = [
         },
     },
     {
+        # 이중 CR/LF로 헤더 종료를 위장, 이후 내용이 body로 흘러들어가게 함 (CWE-113, response splitting)
+        "attack_id": "PL-XSS-CRLF",
+        "vuln_type": "xss",
+        "technique": "crlf_response_split",
+        "sequence": ["baseline", "attack"],
+        "payload_templates": {
+            "attack": [
+                "\r\n\r\n<script>alert(1)</script>",
+                "\r\n\r\n<svg onload=alert(1)>",
+            ],
+        },
+    },
+    {
         "attack_id": "PL-XSS-DOM",
         "vuln_type": "xss",
         "technique": "dom",

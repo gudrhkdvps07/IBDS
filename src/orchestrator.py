@@ -9,7 +9,7 @@ from dataclasses import asdict
 from collector.main_collector import run_collection
 from scan.match.rules_builder import get_rules
 from scan.mutation.discovery import measure_dynamic_markers, run_discovery
-from scan.mutation.request_builder import generate_sqli_families, generate_stored_xss_families, generate_xss_families
+from scan.mutation.request_builder import generate_crlf_families, generate_sqli_families, generate_stored_xss_families, generate_xss_families
 from scan.mutation.scan_point import build_scan_points
 from scan.requester import requester
 from scan.models import CaseResult, FamilyResult, RequestFamily, ScanPoint
@@ -27,6 +27,7 @@ def _route_scan_point(sp: ScanPoint, target: dict, zap) -> list[RequestFamily]:
         discovery = run_discovery(sp, target, zap) # 특수문자가 반사되는 것들만 filtering.
         families.extend(generate_xss_families(sp, target, discovery)) # discovery에서 살아남은 것들 중에  xss_stored 가 아닌 것들만 extend로 풀어서 넣음
         families.extend(generate_stored_xss_families(sp, target))
+        families.extend(generate_crlf_families(sp, target))  # discovery 무관, 헤더 반사 노림
 
     # SQLi boolean 판정용 — 이 ScanPoint가 원래 흔들리는 자리를 baseline 2회 요청으로 실측 (family마다 X, ScanPoint당 1회)
     dynamic_markers = measure_dynamic_markers(sp, target, zap)
