@@ -16,7 +16,6 @@ from .xss.judge import judge_xss
 
 _DOM_TECHNIQUE = "dom"
 _STORED_TECHNIQUE = "stored"
-_REVISIT_MAX_RETRY = 3  # 재조회 재시도 상한(합의값). 소진 & payload 못 찾으면 inconclusive
 
 
 @dataclass
@@ -65,8 +64,7 @@ def _mk_finding(family: dict, case: dict, final_status: str, *, raw=None, hv=Non
     )
 
 
-# [임시] 라인 diff — before/after 비교해 새로 생긴 줄만 반환 (P0-3 합의 방식).
-# 근희 revisit.py의 diff 함수 확정되면 이 함수를 그 import로 교체.
+
 def _diff_new_region(before: str, after: str) -> str | None:
     added = [ln[2:] for ln in difflib.ndiff(before.splitlines(), after.splitlines())
              if ln.startswith("+ ")]
@@ -83,16 +81,20 @@ def _judge_stored(family: dict, case_result: dict, headless: HeadlessSession) ->
 
     before = case_result.get("before_revisit_body") or ""
     after = case_result.get("revisit_body") or ""
-    attempts = case_result.get("revisit_attempts") or 0
+    post_body = case_result.get("response_body") or ""  # 공격 POST 응답 (에코 판별용)
+
+    # found(payload가 재조회에 떴는지)로 판단 (attempts 숫자 비교 X, off-by-one 방지)
+    found = bool(payload) and payload in after
+    if not found:  #재조회엔 없음
+        if payload and payload in post_body:  # POST엔 에코됨 → 반사만, 저장 아님
+            return _mk_finding(family, case, "reflected_only", evidence="POST 에코, 재조회 미저장")
+        return _mk_finding(family, case, "inconclusive", evidence="재조회에 payload 미확인")
 
     new_region = _diff_new_region(before, after)  # diff 게이트: 이번에 새로 생긴 영역
+    if not new_region:  
+        return _mk_finding(family, case, "safe", evidence="재조회에 새 영역 없음(기존 잔재)")
 
-    if not new_region:  # 새 영역 없음 → safe / (재시도 소진 & payload 못 찾음)이면 inconclusive
-        if attempts >= _REVISIT_MAX_RETRY and payload not in after:
-            return _mk_finding(family, case, "inconclusive", evidence="재시도 소진, payload 미확인")
-        return _mk_finding(family, case, "safe", evidence="재조회에 새 영역 없음")
-
-    raw = judge_xss(new_region, payload)  # 새 영역만 judge_xss에 넘김 (전체 본문 아님)
+    raw = judge_xss(new_region, payload) 
     if not raw.vulnerable:
         return _mk_finding(family, case, "safe", raw=raw, evidence="새 영역에 실행가능 반사 없음")
 
