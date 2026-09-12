@@ -4,18 +4,14 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
+from urllib.parse import urlparse
+
+from scan.mutation.variant import build_mutation_case
 
 try:
     from scan.models import MutationCase, SinkProbeResult
 except Exception:
     MutationCase = SinkProbeResult = None
-
-# probe_sink 전용 의존(bs4 체인). 실패해도 refetch/diff는 동작하도록 별도 분리.
-try:
-    from scan.mutation.variant import build_mutation_case
-    from scan.mutation.request_builder import resolve_revisit_url
-except Exception:
-    build_mutation_case = resolve_revisit_url = None
 
 MARKER_PREFIX = "ibds"
 REVISIT_MAX_RETRY = 3      # revisit_max_retry
@@ -53,6 +49,18 @@ def _get_headers_for_revisit(target: dict) -> dict:
     headers = dict(target.get("headers") or {})
     return {k: v for k, v in headers.items()
             if k.lower() not in ("content-type", "content-length")}
+
+
+# Phase 1 프로브가 마커 반사를 확인할 URL 결정
+# 우선순위: 명시된 revisit_url → 동일 호스트 referer → base_url → url
+def resolve_revisit_url(target: dict) -> str:
+    if explicit := target.get("revisit_url"):
+        return explicit
+    target_host = urlparse(target.get("url", "")).netloc
+    referer = target.get("headers", {}).get("referer", "")
+    if referer and urlparse(referer).netloc == target_host:
+        return referer
+    return target.get("base_url") or target.get("url", "")
 
 
 def _reflect_at(target: dict, url: str, marker: str, requester, zap, case_id: str) -> bool:
