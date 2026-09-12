@@ -1,7 +1,3 @@
-"""
-request_results.jsonl -> XSS 판정(raw) + headless confirm -> xss_findings.jsonl
-analyzer/xss/judge.py는 수정하지 안하고 사용. sqli는 아직 제대로 merge 할 수 있는 상태가 아니라서 건너뜀.
-"""
 from __future__ import annotations
 
 import json
@@ -11,9 +7,11 @@ from dataclasses import asdict, dataclass
 from scan.models import RequestFamily, CaseResult
 from utilities.file_utils import append_jsonl
 from .headless import HeadlessSession
+from .revisit import diff_new_region
 from .xss.judge import judge_xss
 
 _DOM_TECHNIQUE = "dom"
+_STORED_TECHNIQUE = "stored"
 
 
 @dataclass
@@ -45,6 +43,58 @@ def _final_status(raw_vulnerable: bool, headless_checked: bool, executed: bool) 
     return "reflected_only" if raw_vulnerable else "safe"
 
 
+# Finding 생성 헬퍼 (stored 분기용) — raw/headless 없으면 기본값 채움
+def _mk_finding(family: dict, case: dict, final_status: str, *, raw=None, hv=None, evidence: str = "") -> Finding:
+    return Finding(
+        family_id=family["family_id"],
+        target_id=family["target_id"],
+        param=family["param"],
+        attack_id=family["attack_id"],
+        technique=family["technique"],
+        case_id=case["case_id"],
+        payload=case.get("payload"),
+        raw_verdict=asdict(raw) if raw else {"vulnerable": False, "confidence": "", "evidence": evidence},
+        headless_checked=hv is not None,
+        headless_verdict=asdict(hv) if hv else None,
+        final_status=final_status,
+    )
+
+
+
+# stored 판정: 재조회 diff → 새 영역(추가된 줄)만 judge_xss → 실제 발화(navigate) 확인 (P0-3)
+def _judge_stored(family: dict, case_result: dict, headless: HeadlessSession) -> Finding:
+    case = case_result["case"]
+    payload = case.get("payload") or ""
+
+    # 3.4: Phase 1 sink 미확인 → inconclusive
+    if not family.get("sink_confirmed"):
+        return _mk_finding(family, case, "inconclusive", evidence="sink 미확인")
+
+    before = case_result.get("before_revisit_body") or ""
+    after = case_result.get("revisit_body") or ""
+
+    # 3.4: Phase 2 재조회 N회 실패(payload 끝내 안 뜸/네트워크·URL 오류) → inconclusive (조용한 safe 강등 금지)
+    if not payload or payload not in after:
+        return _mk_finding(family, case, "inconclusive", evidence="재조회 N회 실패(payload 미확인)")
+
+    # P0-3: diff로 새로 생긴 영역(추가된 줄) 추출 — 없으면 과거 잔재 → safe
+    new_region = diff_new_region(before, after)
+    if not new_region:
+        return _mk_finding(family, case, "safe", evidence="diff 새 영역 없음(잔재)")
+
+    # P0-3: 추가된 줄(새 영역)만 judge_xss에 넘김 (마커로 payload 유일 → 새 줄에 잡힘)
+    raw = judge_xss(new_region, payload)
+    if not raw.vulnerable:
+        return _mk_finding(family, case, "safe", raw=raw, evidence="새 영역에 실행가능 반사 없음")
+
+    hv = headless.confirm_via_navigate(  # 실제 발화 확인 — revisit 페이지를 headless로 열어봄
+        case_result.get("revisit_url_used") or case["url"],
+        case_result.get("effective_cookies") or {},
+        "GET",
+    )
+    return _mk_finding(family, case, "vulnerable" if hv.executed else "reflected_only", raw=raw, hv=hv)
+
+
 # mutation case 1건에 대한 raw 판정 + (필요시) headless 확인
 def judge_case(family: dict, case_result: dict, headless: HeadlessSession) -> Finding:
     case = case_result["case"]
@@ -65,6 +115,9 @@ def judge_case(family: dict, case_result: dict, headless: HeadlessSession) -> Fi
             headless_verdict=None,
             final_status="safe",
         )
+
+    if technique == _STORED_TECHNIQUE:  # stored는 재조회 diff 게이트 경로로 분기
+        return _judge_stored(family, case_result, headless)
 
     raw_verdict = judge_xss(case_result.get("response_body") or "", payload)
     headless_checked = _is_headless_target(raw_verdict.vulnerable, technique)
