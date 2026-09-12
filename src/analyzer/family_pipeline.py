@@ -1,7 +1,3 @@
-"""
-request_results.jsonl -> XSS 판정(raw) + headless confirm -> xss_findings.jsonl
-analyzer/xss/judge.py는 수정하지 안하고 사용. sqli는 아직 제대로 merge 할 수 있는 상태가 아니라서 건너뜀.
-"""
 from __future__ import annotations
 
 import difflib
@@ -71,30 +67,29 @@ def _diff_new_region(before: str, after: str) -> str | None:
     return "\n".join(added) if added else None
 
 
-# stored 판정: 재조회 전/후 diff → 새 영역만 judge_xss → 실제 발화(navigate) 확인
+# stored 판정: 재조회 diff → 새 영역(추가된 줄)만 judge_xss → 실제 발화(navigate) 확인 (P0-3)
 def _judge_stored(family: dict, case_result: dict, headless: HeadlessSession) -> Finding:
     case = case_result["case"]
     payload = case.get("payload") or ""
 
-    if not family.get("sink_confirmed"):  # sink 미확인 family는 판정 불가 (safe로 안 뭉갬)
+    # 3.4: Phase 1 sink 미확인 → inconclusive
+    if not family.get("sink_confirmed"):
         return _mk_finding(family, case, "inconclusive", evidence="sink 미확인")
 
     before = case_result.get("before_revisit_body") or ""
     after = case_result.get("revisit_body") or ""
-    post_body = case_result.get("response_body") or ""  # 공격 POST 응답 (에코 판별용)
 
-    # found(payload가 재조회에 떴는지)로 판단 (attempts 숫자 비교 X, off-by-one 방지)
-    found = bool(payload) and payload in after
-    if not found:  #재조회엔 없음
-        if payload and payload in post_body:  # POST엔 에코됨 → 반사만, 저장 아님
-            return _mk_finding(family, case, "reflected_only", evidence="POST 에코, 재조회 미저장")
-        return _mk_finding(family, case, "inconclusive", evidence="재조회에 payload 미확인")
+    # 3.4: Phase 2 재조회 N회 실패(payload 끝내 안 뜸/네트워크·URL 오류) → inconclusive (조용한 safe 강등 금지)
+    if not payload or payload not in after:
+        return _mk_finding(family, case, "inconclusive", evidence="재조회 N회 실패(payload 미확인)")
 
-    new_region = _diff_new_region(before, after)  # diff 게이트: 이번에 새로 생긴 영역
-    if not new_region:  
-        return _mk_finding(family, case, "safe", evidence="재조회에 새 영역 없음(기존 잔재)")
+    # P0-3: diff로 새로 생긴 영역(추가된 줄) 추출 — 없으면 과거 잔재 → safe
+    new_region = _diff_new_region(before, after)
+    if not new_region:
+        return _mk_finding(family, case, "safe", evidence="diff 새 영역 없음(잔재)")
 
-    raw = judge_xss(new_region, payload) 
+    # P0-3: 추가된 줄(새 영역)만 judge_xss에 넘김 (마커로 payload 유일 → 새 줄에 잡힘)
+    raw = judge_xss(new_region, payload)
     if not raw.vulnerable:
         return _mk_finding(family, case, "safe", raw=raw, evidence="새 영역에 실행가능 반사 없음")
 
