@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import difflib
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -8,6 +7,7 @@ from dataclasses import asdict, dataclass
 from scan.models import RequestFamily, CaseResult
 from utilities.file_utils import append_jsonl
 from .headless import HeadlessSession
+from .revisit import diff_new_region
 from .xss.judge import judge_xss
 
 _DOM_TECHNIQUE = "dom"
@@ -61,12 +61,6 @@ def _mk_finding(family: dict, case: dict, final_status: str, *, raw=None, hv=Non
 
 
 
-def _diff_new_region(before: str, after: str) -> str | None:
-    added = [ln[2:] for ln in difflib.ndiff(before.splitlines(), after.splitlines())
-             if ln.startswith("+ ")]
-    return "\n".join(added) if added else None
-
-
 # stored 판정: 재조회 diff → 새 영역(추가된 줄)만 judge_xss → 실제 발화(navigate) 확인 (P0-3)
 def _judge_stored(family: dict, case_result: dict, headless: HeadlessSession) -> Finding:
     case = case_result["case"]
@@ -84,7 +78,7 @@ def _judge_stored(family: dict, case_result: dict, headless: HeadlessSession) ->
         return _mk_finding(family, case, "inconclusive", evidence="재조회 N회 실패(payload 미확인)")
 
     # P0-3: diff로 새로 생긴 영역(추가된 줄) 추출 — 없으면 과거 잔재 → safe
-    new_region = _diff_new_region(before, after)
+    new_region = diff_new_region(before, after)
     if not new_region:
         return _mk_finding(family, case, "safe", evidence="diff 새 영역 없음(잔재)")
 
