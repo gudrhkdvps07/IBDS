@@ -8,12 +8,38 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Browser, Playwright
 
 _DROP_ON_FULFILL = {"content-encoding", "content-length", "transfer-encoding"}  # fulfill 시 제외할 응답 헤더
+_SETTLE_STEP_MS = 500  # dialog가 이 시간 동안 새로 안 뜨면 다 뜬 것으로 봄 (지연 실행 payload 대비 대기)
+_SETTLE_MAX_MS = 5000  # 대기 상한 — 저장형 payload가 쌓인 페이지(게시판 등)는 dialog가 줄줄이 떠서 한 번 대기로는 뒤쪽 것을 놓침
+
+
+# 페이지 로드 후 dialog가 더 이상 안 뜰 때까지 대기 (상한 있음)
+def _wait_dialogs_settle(page, dialog_messages: list[str]) -> None:
+    waited = 0
+    while waited < _SETTLE_MAX_MS:
+        before = len(dialog_messages)
+        page.wait_for_timeout(_SETTLE_STEP_MS)
+        waited += _SETTLE_STEP_MS
+        if len(dialog_messages) == before:
+            return
+
+
+# 실행으로 인정할 dialog 메시지 선택 - exec_token이 주어지면 그 토큰이 담긴 메시지만 우리 payload 발화로 인정한다.
+def _pick_executed(messages: list[str], exec_token: str | None) -> str | None:
+    if not messages:
+        return None # 토큰 없는 dialog는 페이지가 원래 띄운 것으로 보고 무시
+    if exec_token is None:
+        return messages[0]
+    for msg in messages:
+        if exec_token in msg:
+            return msg
+    return None # exec_token=None이면 첫 메시지
 
 @dataclass
 class HeadlessVerdict:  # headless 확인 1건의 결과
     executed: bool    # alert 등 dialog가 실제로 발생했는지
     method: str       # "render"(재렌더링) 또는 "navigate"(실제 재요청)
     evidence: str     # 짧은 근거 텍스트
+    ok: bool = True   # 검증 자체가 수행됐는지. 렌더/네비 실패·미지원이면 False -> 상위에서 inconclusive
 
 
 class HeadlessSession:
@@ -38,9 +64,10 @@ class HeadlessSession:
         self._playwright = None
 
     # 이미 받은 response_body를 그대로 렌더링만 함, 재요청 없음
-    # url+headers가 있으면 그 URL의 응답인 것처럼 fulfill → 실제 origin·CSP 헤더/Content-Type 적용
+    # url+headers가 있으면 그 URL의 응답인 것처럼 fulfill -> 실제 origin·CSP 헤더/Content-Type 적용
     def confirm_via_render(self, response_body: str, url: str | None = None,
-                           headers: dict[str, str] | None = None) -> HeadlessVerdict:
+                           headers: dict[str, str] | None = None,
+                           exec_token: str | None = None) -> HeadlessVerdict:
         browser = self._ensure_browser()
         page = browser.new_page()
         dialog_messages: list[str] = []
@@ -70,25 +97,30 @@ class HeadlessSession:
                 page.goto(url, timeout=5000)
             else:
                 page.set_content(response_body or "", timeout=5000)
-            page.wait_for_timeout(500)  # 지연 실행 payload 대비 짧은 대기
+            _wait_dialogs_settle(page, dialog_messages)
         except Exception as e:
             if not dialog_messages:  # 이미 발화한 뒤의 타임아웃(느린 하위 리소스 등)은 발화로 인정
-                return HeadlessVerdict(executed=False, method="render", evidence=f"렌더링 실패: {e}")
+                return HeadlessVerdict(executed=False, method="render", evidence=f"렌더링 실패: {e}", ok=False)
         finally:
             page.close()
-        if dialog_messages:
-            return HeadlessVerdict(executed=True, method="render", evidence=f"dialog fired: {dialog_messages[0]}")
+        hit = _pick_executed(dialog_messages, exec_token)
+        if hit is not None:
+            return HeadlessVerdict(executed=True, method="render", evidence=f"dialog fired: {hit}")
+        if dialog_messages:  # dialog는 떴지만 우리 토큰 아님 → 페이지 자체 것으로 보고 실행 아님
+            return HeadlessVerdict(executed=False, method="render",
+                                   evidence=f"우리 토큰 없는 dialog 무시(페이지 자체): {dialog_messages[0]}")
         return HeadlessVerdict(executed=False, method="render", evidence="dialog 없음")
 
-    # 실제 URL로 navigate, 쿠키 주입 후 alert 발생 여부 확인 (DOM 기법·stored 재조회 공용, GET만)
-    def confirm_via_navigate(self, url: str, cookies: dict[str, str], method: str) -> HeadlessVerdict:
-        if method != "GET":  # POST 폼 재현은 ver1 범위 밖 (design doc 참고)
-            return HeadlessVerdict(executed=False, method="navigate", evidence="POST navigate 미지원 (ver1 범위 밖)")
+    # 실제 URL로 navigate, 쿠키 주입 후 alert 발생 여부 확인 (GET만)
+    def confirm_via_navigate(self, url: str, cookies: dict[str, str], method: str,
+                             exec_token: str | None = None) -> HeadlessVerdict:
+        if method != "GET":  # TODO : POST 폼 재현은 추후구현
+            return HeadlessVerdict(executed=False, method="navigate", evidence="POST navigate 미지원 (ver1 범위 밖)", ok=False)
 
         browser = self._ensure_browser()  # 브라우저 실행 실패는 loudly 전파 — try 밖에 유지
         context = None
         try:
-            context = browser.new_context()  # context/쿠키/page 준비도 실패 가능하므로 try 안에서 처리, finally에서 반드시 정리
+            context = browser.new_context(ignore_https_errors=True)  # 자체 서명 인증서 대상 허용
             if cookies:
                 hostname = urlparse(url).hostname
                 context.add_cookies([
@@ -104,12 +136,16 @@ class HeadlessSession:
 
             page.on("dialog", _on_dialog)
             page.goto(url, timeout=10000)
-            page.wait_for_timeout(500)
+            _wait_dialogs_settle(page, dialog_messages)
         except Exception as e:
-            return HeadlessVerdict(executed=False, method="navigate", evidence=f"navigate 실패: {e}")
+            return HeadlessVerdict(executed=False, method="navigate", evidence=f"navigate 실패: {e}", ok=False)
         finally:
             if context is not None:
                 context.close()
-        if dialog_messages:
-            return HeadlessVerdict(executed=True, method="navigate", evidence=f"dialog fired: {dialog_messages[0]}")
+        hit = _pick_executed(dialog_messages, exec_token)
+        if hit is not None:
+            return HeadlessVerdict(executed=True, method="navigate", evidence=f"dialog fired: {hit}")
+        if dialog_messages:  # dialog는 떴지만 우리 토큰 아님 -> 페이지 자체 것으로 보고 실행 아님
+            return HeadlessVerdict(executed=False, method="navigate", 
+                                   evidence=f"우리가 발급한 토큰이 없는 dialog 무시(페이지 자체): {dialog_messages[0]}")
         return HeadlessVerdict(executed=False, method="navigate", evidence="dialog 없음")

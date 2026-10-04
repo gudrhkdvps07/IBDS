@@ -14,9 +14,11 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 from collector.main_collector import run_collection
-from scan.match.rules_builder import get_rules
 from scan.mutation.discovery import measure_dynamic_markers, run_discovery
-from scan.mutation.request_builder import generate_sqli_families, generate_stored_xss_families, generate_xss_families
+from scan.mutation.request_builder import (
+    FRAGMENT_LOCATION, build_fragment_points, generate_dom_fragment_families,
+    generate_sqli_families, generate_stored_xss_families, generate_xss_families,
+)
 from scan.mutation.scan_point import build_scan_points
 from scan.normalize.param_filter import has_destructive_action
 from scan.requester import requester
@@ -25,21 +27,56 @@ from scan.progress import PipelineProgress
 from utilities.file_utils import append_jsonl, load_json
 from analyzer import xss_detector
 from analyzer.xss.headless import HeadlessSession
-from analyzer.xss.revisit import probe_sink, new_run_marker_factory, refetch
+from analyzer.xss.revisit import probe_sink, new_run_marker_factory, refetch, is_same_host
 from analyzer.sqli_detector import analyze_family
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TARGET_CONFIG = os.path.join(_PROJECT_ROOT, "config", "target_config.json")
 
 
+# 전송 불명(delivery_unknown) case의 판정 대체 기록 — 확정본상 전송 실패는 inconclusive
+def _delivery_unknown_finding(family: RequestFamily, case_id: str) -> dict:
+    return {
+        "family_id": family.family_id, "target_id": family.target_id,
+        "param": family.param, "vuln_type": family.vuln_type, "technique": family.technique,
+        "case_id": case_id, "location": family.location, "value_index": family.value_index,  # 지점 식별용
+        "final_status": "inconclusive", "check_status": "incomplete", "reason": "delivery_unknown",
+        "stage": "request", "evidence": "전송 실패로 서버 처리 여부 불명 (POST류라 재시도 안 함)",
+    }
+
+
+# family id와 그 case id들에 접미사 부착 (같은 지점의 family를 출력 위치별로 여러 세트 만들 때 id 충돌 방지)
+def _suffix_family_id(family: RequestFamily, suffix: str) -> None:
+    old = family.family_id
+    family.family_id = old + suffix
+    for case in [family.baseline, *family.mutations]:
+        case.case_id = case.case_id.replace(old, family.family_id, 1)
+
+
+# 저장 출력 위치 탐색(sweep)용 수집된 GET 주소 목록 (파괴적 액션 타겟 제외)
+def _sweep_urls(targets: list[dict]) -> list[str]:
+    urls: list[str] = []
+    for target in targets:
+        if has_destructive_action(target.get("params", {})):
+            continue
+        url = (target.get("url") or "").split("#", 1)[0]
+        if (target.get("method") or "").upper() == "GET" and url and url not in urls:
+            urls.append(url)
+    return urls
+
+
 # ScanPoint 하나를 value_type에 따라 sqli, xss_stored, xss_reflected 경로로 라우팅
-def _route_scan_point(sp: ScanPoint, target: dict, zap, marker_factory=None, findings_path: str | None = None) -> list[RequestFamily]:
+def _route_scan_point(sp: ScanPoint, target: dict, zap, marker_factory=None, findings_path: str | None = None,
+                      sweep_urls: list[str] | None = None) -> list[RequestFamily]:
     if has_destructive_action(target.get("params", {})):
         return []   # 파괴적 액션 있는 타겟은 검사 안함
 
+    if sp.location == FRAGMENT_LOCATION:  # 파라미터 없는 GET 페이지: DOM hash 검사만 (Discovery·stored·SQLi 대상 아님)
+        return generate_dom_fragment_families(sp, target)
+
     families: list[RequestFamily] = []
 
-    if sp.value_type == "string":  # XSS는 문자열 파라미터만 대상
+    try:
         discovery = run_discovery(sp, target, zap) # 특수문자가 반사되는 것들만 filtering.
         families.extend(generate_xss_families(sp, target, discovery)) # discovery에서 살아남은 것들 중에  xss_stored 가 아닌 것들만 extend로 풀어서 넣음
 
@@ -49,36 +86,70 @@ def _route_scan_point(sp: ScanPoint, target: dict, zap, marker_factory=None, fin
             probe_result = None
             probe_err = None
             try:
-                probe_result = probe_sink(sp, target, marker, requester, zap)
+                probe_result = probe_sink(sp, target, marker, requester, zap, sweep_urls=sweep_urls)
             except Exception as e:  # probe_sink 호출만 격리 — 같은 param 의 reflected/SQLi 는 정상 진행
                 probe_err = str(e)
                 print(f"[WARN] probe_sink 실패, stored XSS 스킵: target={sp.target_id} param={sp.name} - {e}")
 
             if probe_result is not None and probe_result.sink_confirmed:
-                stored = generate_stored_xss_families(sp, target)
-                for f in stored:    # sink 확인된 param 의 stored family 에만 프로브 결과 부착
-                    f.sink_confirmed = probe_result.sink_confirmed
-                    f.revisit_url = probe_result.revisit_url
-                    f.probe_marker = probe_result.probe_marker
-                families.extend(stored)
+                # 출력 위치마다 stored family 세트 하나 — 기본 재방문 주소 + sweep으로 찾은 추가 위치
+                sinks = [(probe_result.revisit_url, probe_result.revisit_source)]
+                sinks += [(url, "sweep") for url in probe_result.extra_sinks]
+                for sink_idx, (revisit_url, source) in enumerate(sinks):
+                    stored = generate_stored_xss_families(sp, target)
+                    for f in stored:    # sink 확인된 param 의 stored family 에만 프로브 결과 부착
+                        if sink_idx:    # 추가 위치 세트는 family/case id를 구분
+                            _suffix_family_id(f, f"_sink{sink_idx}")
+                        f.sink_confirmed = probe_result.sink_confirmed
+                        f.revisit_url = revisit_url
+                        f.revisit_source = source
+                        f.probe_marker = probe_result.probe_marker
+                    families.extend(stored)
             elif findings_path:     # sink 미확인(마커 미반사) or 프로브 오류 -> inconclusive
                 if probe_err is not None:
                     sink_note = f"판정 불가 - 프로브 오류: {probe_err}"
                 else:
-                    sink_note = "판정 불가 - sink 미확인 (마커 재조회 미반사)"
+                    sink_note = "판정 불가 - 마커 재조회 확인 실패"
                 append_jsonl(findings_path, {
-                    "target_id": sp.target_id, "param": sp.name,
-                    "stage": "probe", "status": "inconclusive",
+                    "target_id": sp.target_id,
+                    "param": sp.name,
+                    "vuln_type": "xss",       # 새 결과 계약: probe 기록도 다른 판정과 동일한 필드로 통일
+                    "technique": "stored",
+                    "location": sp.location,        # 지점 식별용
+                    "value_index": sp.value_index,
+                    "stage": "probe",
+                    "final_status": "inconclusive",
                     "probe_marker": marker,
                     "revisit_url": probe_result.revisit_url if probe_result is not None else None,
                     "sink_note": sink_note,
                 })
         else:
             families.extend(generate_stored_xss_families(sp, target))
+    except Exception as e:
+        if findings_path:
+            append_jsonl(findings_path, {
+                    "target_id": sp.target_id,
+                    "param": sp.name,
+                    "stage": "xss_prepare",
+                    "status": "error",
+                    "error": str(e),
+            })
+        print(f"[WARN] XSS 준비 단계 실패: target={sp.target_id} param={sp.name} - {e}")
 
-    # SQLi boolean 판정용
-    dynamic_markers, baseline_match_ratio = measure_dynamic_markers(sp, target, zap)
-    families.extend(generate_sqli_families(sp, target, dynamic_markers, baseline_match_ratio))
+    # SQLi 
+    try : 
+        dynamic_markers, baseline_match_ratio = measure_dynamic_markers(sp, target, zap)
+        families.extend(generate_sqli_families(sp, target, dynamic_markers, baseline_match_ratio))
+    except Exception as e:
+            if findings_path:
+                append_jsonl(findings_path, {
+                        "target_id": sp.target_id,
+                        "param": sp.name,
+                        "stage": "sqli_prepare",
+                        "status": "error",
+                        "error": str(e),
+                })
+            print(f"[WARN] SQLi 준비 단계 실패 : target={sp.target_id} param={sp.name} - {e}")
 
     return families
 
@@ -114,6 +185,7 @@ def _revisit_after_fields(revisit_url, family, case, requester, zap, target, rev
         revisit_attempts=revisit_after.attempts,
         revisit_found=revisit_after.found,      # payload가 after에 반사됐는지
         revisit_body=revisit_after.body,
+        revisit_headers=revisit_after.headers,  # headless가 이 스냅샷을 렌더링할 때 사용
     )
     if revisit_before is not None:
         fields["before_revisit_body"] = revisit_before.body
@@ -126,11 +198,13 @@ def _revisit_after_fields(revisit_url, family, case, requester, zap, target, rev
 # 공격 응답 Location에서 이번 case가 쓸 재방문 주소 추출 (상대경로면 case.url 기준 절대주소로 변환, 없으면 None)
 def _resolve_case_revisit_url(sent: dict, case) -> str | None:
     location = sent["response_headers"].get("location")
-    return urljoin(case.url, location) if location else None
+    if not location:
+        return None
+    resolved = urljoin(case.url, location)
+    return resolved if is_same_host(case.url, resolved) else None  # 범위 밖 목적지 -> 호출부가 family.revisit_url로 폴백
 
 
-# 사용자가 로컬 웹 설정에서 등록한 "A url -> B url" 재방문 주소를 target 딕셔너리에 반영
-# (target["revisit_url"]에 채워두면 analyzer.xss.revisit.resolve_revisit_url이 최우선으로 사용함)
+# 로컬 웹 설정의 재방문 주소(A url -> B url)를 target["revisit_url"]에 반영 (resolve_revisit_url이 최우선으로 사용)
 def _apply_revisit_overrides(targets: list[dict]) -> None:
     overrides = load_json(_TARGET_CONFIG, default={}).get("revisit_urls") or {}
     if not overrides:
@@ -141,8 +215,7 @@ def _apply_revisit_overrides(targets: list[dict]) -> None:
             target["revisit_url"] = match
 
 
-# collector ->  ScanPoint 라우팅 -> 요청 전송 -> 판정 -> findings.jsonl까지 ScanPoint 단위로 실행
-# on_paths_ready: (results_path, findings_path)를 알게 되는 즉시 호출되는 콜백 (로컬 웹의 진행 상황 조회용, 없으면 무시)
+# collector -> ScanPoint 라우팅 -> 요청 전송 -> 판정 -> findings.jsonl까지 실행 (on_paths_ready는 결과 경로를 알게 되면 호출하는 콜백)
 def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output_dir=None) -> str:
     progress = PipelineProgress(callback=on_progress, stop_requested=should_stop)
 
@@ -152,12 +225,14 @@ def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output
             on_paths_ready(os.path.join(out_dir, "request_results.jsonl"),
                            os.path.join(out_dir, "findings.jsonl"))
 
-    out_dir, targets_path = run_collection(on_output_ready=output_ready, output_dir=output_dir)
+    out_dir, targets_path = run_collection(on_output_ready=output_ready, output_dir=output_dir, should_stop=should_stop)
     with open(targets_path, encoding="utf-8") as f:
         targets = json.load(f)
     _apply_revisit_overrides(targets)
     target_by_id = {f"t{idx}": target for idx, target in enumerate(targets)} # 타겟에 ID 부여 (ex. t0)
     scan_points = build_scan_points(targets)   # 타겟들을 파라미터 단위로 쪼갬.
+    scan_points += build_fragment_points(targets, scan_points)  # 스캔 지점 없는 GET 페이지는 DOM hash 검사용 지점 1개
+    sweep_urls = _sweep_urls(targets)          # 저장형 출력 위치 탐색 후보 (저장 확인된 form 파라미터에만 사용)
     progress.total = len(scan_points)
     progress.publish()
 
@@ -180,7 +255,8 @@ def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output
                 break
             target = target_by_id[sp.target_id]
             try:
-                families = _route_scan_point(sp, target, zap, marker_factory=marker_factory, findings_path=findings_path)
+                families = _route_scan_point(sp, target, zap, marker_factory=marker_factory, findings_path=findings_path,
+                                             sweep_urls=sweep_urls)
             except Exception as e:             # 라우팅(Discovery 포함) 실패는 findings.jsonl에 에러 레코드만 남기고 다음 ScanPoint로 넘김.
                 append_jsonl(findings_path, {
                     "target_id": sp.target_id, "param": sp.name,
@@ -204,6 +280,11 @@ def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output
                 total_count += 1
                 try:
                     sent = requester.send(baseline_case, zap)
+                except requester.RequestDeliveryUnknown as e:  # POST류 baseline 전송 불명 — 서버 처리 여부 모름 상태로 구분
+                    baseline_result = CaseResult(case=baseline_case, status="error", error=str(e), reason="delivery_unknown")
+                    progress.failed += 1
+                    progress.publish()
+                    print(f"[ERROR] baseline 전송 불명(서버 처리 여부 모름): target={sp.target_id} param={sp.name} - {e}")
                 except Exception as e:  # baseline 요청 실패는 이 ScanPoint의 모든 family에 동일하게 반영
                     baseline_result = CaseResult(case=baseline_case, status="error", error=str(e))
                     progress.failed += 1
@@ -241,6 +322,12 @@ def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output
 
                     try:
                         sent = requester.send(case, zap)
+                    except requester.RequestDeliveryUnknown as e:  # 전송 불명 — 판정 대신 전송 사유 남기고 계속 진행
+                        progress.failed += 1
+                        progress.publish()
+                        case_results.append(CaseResult(case=case, status="error", error=str(e), reason="delivery_unknown"))
+                        print(f"[ERROR] 전송 불명(서버 처리 여부 모름): family={family.family_id} case={case.case_id} - {e}")
+                        continue
                     except Exception as e:  # 개별 요청 실패는 로그만 남기고 계속 진행
                         progress.failed += 1
                         progress.publish()
@@ -250,7 +337,9 @@ def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output
 
                     revisit_fields = {}
                     if needs_revisit:  # 공격 POST 직후 재조회
-                        case_revisit_url = _resolve_case_revisit_url(sent, case) or family.revisit_url
+                        # 프로브가 Location으로 위치를 찾은 경우만 case별 Location 추종, 그 외(유저 지정·sweep 등)는 고정 사용
+                        case_revisit_url = ((family.revisit_source == "location" and _resolve_case_revisit_url(sent, case))
+                                            or family.revisit_url)
                         if case_revisit_url != family.revisit_url:  # 응답 주소가 이전 주소와 다름 -> 이 변형 전용 새 주소, 이전에 찍은 사전 스냅샷은 무효
                             revisit_before, before_note = None, "이전과 재방문 주소가 다름 (사전 스냅샷 무효)"
                         revisit_fields = _revisit_after_fields(case_revisit_url, family, case, requester, zap, target, revisit_before, before_note)
@@ -269,6 +358,7 @@ def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output
                     family_id=family.family_id, vuln_type=family.vuln_type, technique=family.technique,
                     target_id=family.target_id, param=family.param, attack_id=family.attack_id,
                     baseline=case_results[0], mutations=case_results[1:],
+                    location=family.location, value_index=family.value_index,  # 지점 식별용
                     dynamic_markers=family.dynamic_markers,
                     baseline_match_ratio=family.baseline_match_ratio,
                     sink_confirmed=family.sink_confirmed,
@@ -280,12 +370,16 @@ def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output
                 append_jsonl(results_path, family_dict)
 
                 # SQLi 판정
-                if family.vuln_type == "sqli":  
+                if family.vuln_type == "sqli":
+                    if baseline_result.reason == "delivery_unknown":  # 기준값 전송 불명 -> 비교 불가, 판정 대신 전송 사유 기록
+                        append_jsonl(findings_path, _delivery_unknown_finding(family, family.baseline.case_id))
+                        continue
                     if len(case_results) - 1 < len(family.mutations):
                         append_jsonl(findings_path, {
                             "family_id": family.family_id, "target_id": family.target_id,
                             "param": family.param, "vuln_type": family.vuln_type,
                             "technique": family.technique, "final_status": "inconclusive",
+                            "location": family.location, "value_index": family.value_index,  # 지점 식별용
                             "stage": "stop", "evidence": "사용자 중단으로 비교 요청 묶음 미완료",
                         })
                         break
@@ -304,6 +398,9 @@ def run_pipeline(on_paths_ready=None, on_progress=None, should_stop=None, output
 
                 # XSS 판정
                 for i, result in enumerate(case_results[1:]): # 수행한 요청만 판정 대상
+                    if result.reason == "delivery_unknown":  # 전송 불명 case -> 판정 대신 전송 사유 기록 (analyzer 판정과 중복 방지)
+                        append_jsonl(findings_path, _delivery_unknown_finding(family, result.case.case_id))
+                        continue
                     try:
                         finding = xss_detector.judge_case(family_dict, family_dict["mutations"][i], headless) # 미리 변환해둔 dict 재사용
                         append_jsonl(findings_path, asdict(finding))

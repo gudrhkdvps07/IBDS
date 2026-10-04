@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from difflib import SequenceMatcher
+from typing import Any
 
 from .finding import Finding
+from .final_status import POTENTIAL_HIGH, POTENTIAL_MEDIUM, POTENTIAL_LOW, INCONCLUSIVE
 from .sqli.judge import (
+    EXTRACT_MARKER,
     MIN_REPEAT_CONFIRM,
     judge_error_based_sqli,
     judge_time_based_sqli,
-    judge_union_sqli,
     _strip_dynamic,
     _strip_value,
 )
@@ -28,24 +31,28 @@ def _body(result: dict | None) -> str:
     return result.get("response_body") or ""
 
 
-def _finding(family: dict, result: dict, confidence: str, evidence: str) -> Finding:
+def _finding(family: dict, result: dict, confidence: str, evidence: str, final_status: str = INCONCLUSIVE) -> Finding:
     case = result.get("case") or {}
     return Finding(
         vuln_type="sqli",
-        family_id=family.get("family_id"),
-        target_id=family.get("target_id"),
-        param=family.get("param"),
-        attack_id=family.get("attack_id"),
-        technique=family.get("technique"),
-        case_id=case.get("case_id"),
+        family_id=str(family.get("family_id") or ""),
+        target_id=str(family.get("target_id") or ""),
+        param=str(family.get("param") or ""),
+        attack_id=str(family.get("attack_id") or ""),
+        technique=str(family.get("technique") or ""),
+        case_id=str(case.get("case_id") or ""),
         method=case.get("method"),
         url=case.get("url"),
         location=case.get("body_type"),
+        value_index=family.get("value_index"),
         payload=case.get("payload"),
-        raw_verdict={"vulnerable": True, "confidence": confidence, "evidence": evidence},
+        raw_verdict={
+            "vulnerable": final_status in (POTENTIAL_HIGH, POTENTIAL_MEDIUM),
+            "confidence": confidence, "evidence": evidence,
+        },
         headless_checked=False,
         headless_verdict=None,
-        final_status="vulnerable",
+        final_status=final_status,
     )
 
 
@@ -54,70 +61,95 @@ def _payload_of(mutation: dict) -> str:
 
 
 def _clean_body(family: dict, result: dict | None) -> str:
-    # 응답에서 payload 반사분 + 이 타겟이 원래 흔들리는 자리(dynamic_markers)를 제거해 diff 비교의 노이즈를 걷어냄
+    # payload 반사분·dynamic_markers 제거해 diff 노이즈 걷어냄
     body = _strip_value(_body(result), _payload_of(result or {}))
     return _strip_dynamic(body, family.get("dynamic_markers") or [])
 
 
+# safe, inconclusive finding의 식별 필드
+def _representative_result(family: dict) -> dict:
+    mutations = family.get("mutations") or []
+    return mutations[0] if mutations else (family.get("baseline") or {})
+
+
+def _family_finding(family: dict, final_status: str, evidence: str) -> Finding:
+    return _finding(family, _representative_result(family), "", evidence, final_status)
+
+
+def _bcase(mutation: dict, key: str) -> Any:  # MutationCase의 SQLi 비교 계약 필드 접근
+    return (mutation.get("case") or {}).get(key)
+
+
+def _is_time_control(mutation: dict) -> bool:
+    role = _bcase(mutation, "role")
+    if role is not None:
+        return role == "control"
+    return str(_bcase(mutation, "step") or "") == "control"
+
+
+def _sim(base_clean: str, family: dict, mutation: dict) -> float:
+    return SequenceMatcher(None, base_clean, _clean_body(family, mutation)).ratio()
+
+
+# Boolean : pair_id로 묶어 expected 방향 비교, control로 노이즈 게이트, repeat로 재현성 확인
 def _analyze_boolean(family: dict) -> list[Finding]:
     base_clean = _clean_body(family, family.get("baseline"))
-    true_results = []
-    false_results = []
-    for mutation in family.get("mutations", []):
-        if not _successful(mutation):
-            continue
-        step = str((mutation.get("case") or {}).get("step") or "")
-        if step == "true_attack":
-            true_results.append(mutation)
-        elif step == "false_attack":
-            false_results.append(mutation)
+    muts = [m for m in family.get("mutations", []) if _successful(m)]
+    attacks = [m for m in muts if _bcase(m, "role") in ("attack_true", "attack_false")]
 
-    if not base_clean or not true_results or not false_results:
-        return []
+    # pair 필드가 없거나 성공한 공격 응답이 없으면 검사 미완료
+    if not base_clean or not attacks:
+        return [_family_finding(family, INCONCLUSIVE, "boolean pair 요청이 없거나 성공한 요청이 없어 검사 미완료")]
 
+    # control(비-SQL 잡음)로 노이즈 바닥 측정 — 입력만 바꿔도 흔들리는 페이지면 노이즈가 큼
+    control_scores = [_sim(base_clean, family, m) for m in muts if _bcase(m, "role") == "control"]
+    noise = (1.0 - min(control_scores)) if control_scores else 0.0
 
-    baseline_match_ratio = family.get("baseline_match_ratio")
-    true_gate = max(0.0, baseline_match_ratio - _GATE_MARGIN) if baseline_match_ratio is not None else _TRUE_GATE
+    bmr = family.get("baseline_match_ratio")
+    gate = max(0.0, bmr - _GATE_MARGIN) if bmr is not None else _TRUE_GATE
 
+    # pair_id별로 expected 방향에 따라 점수 수집 (repeat 포함)
+    pairs: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"approx": [], "differ": []})
+    for m in attacks:
+        exp = _bcase(m, "expected")
+        score = _sim(base_clean, family, m)
+        if exp == "approx_baseline":
+            pairs[_bcase(m, "pair_id")]["approx"].append(score)
+        elif exp == "differ_baseline":
+            pairs[_bcase(m, "pair_id")]["differ"].append(score)
 
-    hits: list[tuple[dict, float, float, float]] = []  # (true_result, gap, true_score, false_score)
-    for true_result in true_results:
-        # 같은 주입 스타일의 false 짝 찾기 — payload 문자열이 가장 유사한 것 (1=1 ↔ 1=2 차이만)
-        true_payload = _payload_of(true_result)
-        false_result = max(
-            false_results,
-            key=lambda f: SequenceMatcher(None, true_payload, _payload_of(f)).ratio(),
-        )
-        true_score = SequenceMatcher(None, base_clean, _clean_body(family, true_result)).ratio()
-        false_score = SequenceMatcher(None, base_clean, _clean_body(family, false_result)).ratio()
-
-
-        hi = max(true_score, false_score)
-        lo = min(true_score, false_score)
-
-        # (1) 게이트
-        if hi < true_gate:
-            continue
-        # (2) noise-aware 문턱
-        noise = 1.0 - hi
-        threshold = hi - max(noise, _STATIC_EPS)
-        gap = hi - lo
-        if lo < threshold:
-            hits.append((true_result, gap, true_score, false_score))
+    hits: list[tuple[str, float, float, float, bool]] = []  # (pair_id, gap, approx_min, differ_max, reproduced)
+    for pid, g in pairs.items():
+        if not g["approx"] or not g["differ"]:
+            continue  # 한쪽만 성공한 pair는 판정 불가 -> 스킵
+        approx_min = min(g["approx"])   # approx 역은 baseline과 가까워야 최악(min)으로 확인
+        differ_max = max(g["differ"])   # differ 역은 baseline과 달라야 최악(max)으로 확인
+        gap = approx_min - differ_max
+        if approx_min >= gate and gap > max(noise, _STATIC_EPS):  # 방향 일치 + 노이즈 초과
+            reproduced = len(g["approx"]) >= 2 and len(g["differ"]) >= 2  # true, false 둘 다 반복 존재
+            hits.append((pid, gap, approx_min, differ_max, reproduced))
 
     if not hits:
-        return []
+        return [_family_finding(family, POTENTIAL_LOW, "pair 내 expected 방향 분기 안보임(노이즈 이내)")]
 
-    best_result, best_gap, best_true_score, best_false_score = max(hits, key=lambda h: h[1])
-    confirmed = len(hits) >= MIN_REPEAT_CONFIRM
+    best_pid, best_gap, best_approx, best_differ, best_repro = max(hits, key=lambda h: h[1])
+    confirmed = len(hits) >= MIN_REPEAT_CONFIRM and best_repro
     confidence = "high" if confirmed else "medium"
-    status = "confirmed" if confirmed else "suspected, 재현성 부족 - 추가 검증 필요"
+    status = "confirmed" if confirmed else "suspected - 재현성/컨텍스트 부족, 추가 검증 필요"
     evidence = (
-        f"Boolean SQLi ({status}): true/false 응답 분기, "
-        f"{len(hits)}/{len(true_results)}개 injection 스타일에서 재현 "
-        f"(true={best_true_score:.3f}, false={best_false_score:.3f}, gap={best_gap:.3f})"
+        f"Boolean SQLi ({status}): {len(hits)}개 pair에서 expected 방향대로 분기 "
+        f"(approx={best_approx:.3f}, differ={best_differ:.3f}, gap={best_gap:.3f}, noise={noise:.3f})"
     )
-    return [_finding(family, best_result, confidence, evidence)]
+    rep = next((m for m in attacks if _bcase(m, "pair_id") == best_pid), attacks[0])
+    return [_finding(family, rep, confidence, evidence, POTENTIAL_HIGH if confirmed else POTENTIAL_MEDIUM)]
+
+
+# 무신호 종결 상태. 공격 일부가 전송 실패했으면 미검사 구간이 있어 POTENTIAL_LOW 금지 → inconclusive
+def _no_signal_status(raw_mutations: list, mutations: list, evidence: str) -> tuple[str, str]:
+    failed = len(raw_mutations) - len(mutations)
+    if failed > 0:
+        return INCONCLUSIVE, f"{evidence} — 공격 {failed}건 전송 실패로 미검사 구간 있음(POTENTIAL_LOW 금지)"
+    return POTENTIAL_LOW, evidence
 
 
 def _analyze_sqli(family: dict) -> list[Finding]:
@@ -125,32 +157,57 @@ def _analyze_sqli(family: dict) -> list[Finding]:
     if technique.startswith("boolean"):
         return _analyze_boolean(family)
 
-    # order_by 는 ORDER BY <큰수> payload가 컬럼 에러를 유발 → 아래 error-based 판정기로 처리
     baseline = family.get("baseline") or {}
-    baseline_body = _body(baseline)
-    baseline_elapsed = float(baseline.get("elapsed") or 0.0)
-    mutations = [item for item in family.get("mutations", []) if _successful(item)]
-    if technique.startswith("time"):
-        elapsed = [float(item.get("elapsed") or 0.0) for item in mutations]
-        verdict = judge_time_based_sqli(baseline_elapsed, elapsed)
-        if verdict.vulnerable and mutations:
-            slowest = max(mutations, key=lambda item: float(item.get("elapsed") or 0.0))
-            return [_finding(family, slowest, verdict.confidence, verdict.evidence)]
+    raw_mutations = family.get("mutations") or []
+    mutations = [item for item in raw_mutations if _successful(item)]
+
+    # 성공한 공격 응답이 없음: 공격이 있었는데 전부 전송 실패면 검사 미완료, 애초에 없었으면 스킵
+    if not mutations:
+        if raw_mutations:
+            return [_family_finding(family, INCONCLUSIVE, "공격 요청 전송 실패로 검사 미완료")]
         return []
 
-    # union → 컬럼 수 불일치 에러, 그 외(error_meta·order_by 등) → DB 에러 시그니처로 판정.
-    # order_by 는 "ORDER BY {큰수}" 가 Unknown column 에러를 유발하므로 error 판정기로 낙하한다.
-    judge = judge_union_sqli if technique == "union" else judge_error_based_sqli
-    for mutation in mutations:
-        verdict = judge(baseline_body, _body(mutation))
+    if technique.startswith("time"):
+        attack_muts = [m for m in mutations if not _is_time_control(m)]
+        control_muts = [m for m in mutations if _is_time_control(m)]
+        if not attack_muts:
+            return [_family_finding(family, INCONCLUSIVE, "공격 요청 전송 실패로 검사 미완료 (대조 요청만 성공)")]
+        baseline_elapsed = float(baseline.get("elapsed") or 0.0)
+        attack_elapsed = [float(m.get("elapsed") or 0.0) for m in attack_muts]
+        control_elapsed = [float(m.get("elapsed") or 0.0) for m in control_muts]
+        verdict = judge_time_based_sqli(baseline_elapsed, attack_elapsed, control_elapsed)
         if verdict.vulnerable:
-            return [_finding(family, mutation, verdict.confidence, verdict.evidence)]
-    return []
+            slowest = max(attack_muts, key=lambda m: float(m.get("elapsed") or 0.0))
+            return [_finding(family, slowest, verdict.confidence, verdict.evidence, verdict.final_status)]
+        return [_family_finding(family, POTENTIAL_LOW, verdict.evidence)]
+
+    baseline_body = _body(baseline)
+
+    # error 계열(union 포함): 추출 마커 확인 시 HIGH, baseline엔 없던 DB 에러만 노출 시 MEDIUM.
+    # union의 컬럼 수 불일치 시그니처는 DB_ERROR_KEYWORDS에 이미 포함돼 있어 여기로 합류.
+    # error_extract technique는 extraction으로 분기
+    judgment = "extraction" if technique == "error_extract" else str(family.get("judgment") or "structural")
+    marker = family.get("extract_marker") or EXTRACT_MARKER
+    medium_hit = None
+    for mutation in mutations:
+        verdict = judge_error_based_sqli(
+            baseline_body, _body(mutation), extract_marker=marker, judgment=judgment,
+            payload=_payload_of(mutation),
+        )
+        if verdict.final_status == POTENTIAL_HIGH:
+            return [_finding(family, mutation, verdict.confidence, verdict.evidence, POTENTIAL_HIGH)]
+        if verdict.final_status == POTENTIAL_MEDIUM and medium_hit is None:
+            medium_hit = (mutation, verdict)
+    if medium_hit is not None:
+        mutation, verdict = medium_hit
+        return [_finding(family, mutation, verdict.confidence, verdict.evidence, POTENTIAL_MEDIUM)]
+    status, evidence = _no_signal_status(raw_mutations, mutations, "DB 에러·마커 시그니처 없음")
+    return [_family_finding(family, status, evidence)]
 
 
 def analyze_family(family: dict) -> list[Finding]:
-    if not _successful(family.get("baseline")):
+    if str(family.get("vuln_type") or "").lower() != "sqli":
         return []
-    if str(family.get("vuln_type") or "").lower() == "sqli":
-        return _analyze_sqli(family)
-    return []
+    if not _successful(family.get("baseline")):
+        return [_family_finding(family, INCONCLUSIVE, "기준값 전송 실패로 비교 불가")]
+    return _analyze_sqli(family)
