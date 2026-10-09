@@ -76,8 +76,13 @@ def resolve_revisit_url(target: dict) -> str:
     return target.get("base_url") or target.get("url", "")
 
 
-# 마커 반사 확인
-def _reflect_at(target: dict, url: str, marker: str, requester, zap, case_id: str) -> bool:
+# 재조회 응답이 유효한지 (403, 500 등은 마커가 없어도 저장 없음으로 볼 수 없음)
+def _is_valid_status(status) -> bool:
+    return isinstance(status, int) and 200 <= status < 400
+
+
+# 마커 반사 확인 - (마커 반사 여부, 응답 상태 코드) 반환
+def _reflect_at(target: dict, url: str, marker: str, requester, zap, case_id: str) -> tuple[bool, int | None]:
     get_case = MutationCase(
         case_id=case_id,
         step="probe_revisit",
@@ -89,7 +94,7 @@ def _reflect_at(target: dict, url: str, marker: str, requester, zap, case_id: st
         body="",
     )
     resp = requester.send(get_case, zap)
-    return marker in (resp.get("response_body") or "")  # marker 반사 여부만 bool로 확인 (본문 자체는 버림)
+    return marker in (resp.get("response_body") or ""), resp.get("response_status")  # 본문 자체는 버림
 
 
 _MAX_EXTRA_SINKS = 3  # sweep으로 찾은 추가 출력 위치 상한 (위치마다 stored family 세트가 하나씩 늘어남)
@@ -122,16 +127,24 @@ def probe_sink(sp, target: dict, marker: str, requester, zap, sweep_urls: list[s
     else:
         revisit_url, source = resolve_revisit_url(target), "default"
     used_url = revisit_url
-    confirmed = _reflect_at(target, revisit_url, marker, requester, zap,
-                            case_id=f"probe_{sp.target_id}_{sp.tag}_revisit")
+    checked_urls = [revisit_url]
+    invalid_revisits: list[str] = []
+    confirmed, status = _reflect_at(target, revisit_url, marker, requester, zap,
+                                    case_id=f"probe_{sp.target_id}_{sp.tag}_revisit")
+    if not confirmed and not _is_valid_status(status):
+        invalid_revisits.append(f"{revisit_url} ({status})")
 
     if not confirmed:
         base_url = target.get("base_url") or ""
         if base_url and base_url != revisit_url:
-            if _reflect_at(target, base_url, marker, requester, zap,
-                           case_id=f"probe_{sp.target_id}_{sp.tag}_revisit_base"):
+            checked_urls.append(base_url)
+            found, status = _reflect_at(target, base_url, marker, requester, zap,
+                                        case_id=f"probe_{sp.target_id}_{sp.tag}_revisit_base")
+            if found:
                 confirmed = True
                 used_url, source = base_url, "default"
+            elif not _is_valid_status(status):
+                invalid_revisits.append(f"{base_url} ({status})")
 
     # 저장이 확인된 파라미터만 다른 출력 위치 탐색 — 저장 안 되는 대상(반사형 전용 등)엔 요청을 늘리지 않음
     extra_sinks: list[str] = []
@@ -142,7 +155,7 @@ def probe_sink(sp, target: dict, marker: str, requester, zap, sweep_urls: list[s
             if url == used_url or not is_same_host(target.get("url", ""), url):
                 continue
             if _reflect_at(target, url, marker, requester, zap,
-                           case_id=f"probe_{sp.target_id}_{sp.tag}_sweep{idx}"):
+                           case_id=f"probe_{sp.target_id}_{sp.tag}_sweep{idx}")[0]:
                 extra_sinks.append(url)
 
     return SinkProbeResult(
@@ -153,6 +166,8 @@ def probe_sink(sp, target: dict, marker: str, requester, zap, sweep_urls: list[s
         probe_marker=marker,
         revisit_source=source,
         extra_sinks=extra_sinks,
+        checked_urls=checked_urls,
+        invalid_revisits=[] if confirmed else invalid_revisits,
     )
 
 

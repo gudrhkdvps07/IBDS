@@ -161,6 +161,8 @@ class SinkProbeResult:  # stored XSS 재조회 전 저장 여부 확인
     probe_marker: str    # 이번 프로브에 사용한 마커
     revisit_source: str | None = None  # revisit_url 출처
     extra_sinks: list[str] = field(default_factory=list)  # 저장 확인 후 수집 페이지 전체 확인으로 찾은 다른 출력 위치 (revisit_url 제외)
+    checked_urls: list[str] = field(default_factory=list)  # 저장 확인에서 마커를 찾아본 주소 (sweep 제외)
+    invalid_revisits: list[str] = field(default_factory=list)  # 재조회 응답이 무효(2xx, 3xx 아님)였던 주소와 상태 코드 -> 확인 실패
 
 
 @dataclass
@@ -206,3 +208,20 @@ class SinkNotConfirmedFinding(StatusGuarded):  # 저장형 XSS 저장 위치(마
     stage: str = "probe"
     final_status: str = "inconclusive"
     reason: ReasonCode = "sink_not_confirmed"
+
+
+@dataclass
+class StoredNotFoundFinding(StatusGuarded):  # 저장형 사전 확인 요청은 모두 성공했지만 확인한 주소에 마커가 없어 저장 없음으로 끝난 기록
+    target_id: str
+    param: str
+    location: str | None          # 지점 식별용
+    value_index: int | None       # 지점 식별용
+    probe_marker: str
+    checked_urls: list[str]       # 마커를 확인한 주소 (다른 페이지 출력은 확인 범위 밖)
+    sink_note: str = "저장 없음 - 확인한 주소에서 마커 미확인"
+    vuln_type: str = "xss"
+    technique: str = "stored"
+    stage: str = "probe"
+    final_status: str = "potential_low"
+    progress_status: ProgressStatus = "completed"  # 집계와 화면은 stage보다 이 값을 우선
+    reason: ReasonCode | None = None

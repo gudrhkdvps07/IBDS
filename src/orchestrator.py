@@ -24,7 +24,7 @@ from scan.normalize.param_filter import has_destructive_action
 from scan.requester import requester
 from scan.models import (
     CaseResult, DeliveryUnknownFinding, DiscoveryResult, FamilyResult, RequestFamily,
-    ScanPoint, ScanPointRecord, SinkNotConfirmedFinding,
+    ScanPoint, ScanPointRecord, SinkNotConfirmedFinding, StoredNotFoundFinding,
 )
 from scan.progress import PipelineProgress
 from utilities.file_utils import append_jsonl, load_json
@@ -166,11 +166,21 @@ def _route_scan_point(sp: ScanPoint, target: dict, zap, marker_factory=None, fin
                         f.probe_marker = probe_result.probe_marker
                     families.extend(stored)
         
-            elif findings_path:     # sink 미확인(마커 미반사) or 프로브 오류 -> inconclusive
+            elif findings_path and probe_err is None and not probe_result.invalid_revisits:
+                # 요청은 모두 정상 응답, 마커 없음 -> 저장 없음, 검사 완료
+                append_jsonl(findings_path, asdict(StoredNotFoundFinding(
+                    target_id=sp.target_id,
+                    param=sp.name,
+                    location=sp.location,
+                    value_index=sp.value_index,
+                    probe_marker=marker,
+                    checked_urls=probe_result.checked_urls,
+                )))
+            elif findings_path:     # 프로브 요청 실패나 재조회 응답 무효 -> 저장 확인 실패, inconclusive
                 if probe_err is not None:
                     sink_note = f"판정 불가 - 프로브 오류: {probe_err}"
                 else:
-                    sink_note = "판정 불가 - 마커 재조회 확인 실패"
+                    sink_note = f"판정 불가 - 재조회 응답 무효: {', '.join(probe_result.invalid_revisits)}"
                 append_jsonl(findings_path, asdict(SinkNotConfirmedFinding(
                     target_id=sp.target_id,
                     param=sp.name,
