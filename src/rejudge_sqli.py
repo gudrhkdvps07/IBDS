@@ -19,13 +19,13 @@ _STRICT = {"potential_high"}  # 엄격 기준: 취약 가능성 높음만 탐지
 _LOOSE = _STRICT | {"potential_medium"}  # 완화 기준: 취약 신호 관찰까지 인정
 
 
-# 정답표에서 sqli 항목만 로드: {테스트번호: 실제취약여부}
-def _load_expected() -> dict[str, bool]:
+# 정답표에서 해당 분류(sqli/xss) 항목만 로드: {테스트번호: 실제취약여부}
+def _load_expected(category: str = "sqli") -> dict[str, bool]:
     expected = {}
     with open(_EXPECTED_CSV, encoding="utf-8-sig", newline="") as f:
         for row in csv.reader(f):
             m = _TEST_RE.search(row[0]) if len(row) >= 3 and not row[0].startswith("#") else None
-            if m and row[1].strip() == "sqli":
+            if m and row[1].strip() == category:
                 expected[m.group(1)] = row[2].strip().lower() == "true"
     return expected
 
@@ -164,5 +164,28 @@ def rejudge(run_dir: str) -> dict[int, Counter]:
     return summary
 
 
+# findings.jsonl의 XSS 판정을 정답표와 맞춰 채점 (단계 구분 없음) 후 xss_summary.json 저장
+def score_xss(run_dir: str) -> dict:
+    expected = _load_expected("xss")
+    collected = _collected_tests(run_dir) & expected.keys()
+    statuses: dict[str, set] = {}
+    with open(os.path.join(run_dir, "findings.jsonl"), encoding="utf-8") as f:
+        for line in f:
+            fd = json.loads(line)
+            m = _TEST_RE.search(fd.get("url") or "")
+            if m and fd.get("vuln_type") == "xss" and fd.get("family_id"):  # 준비 실패 줄 등 family 없는 기록 제외
+                statuses.setdefault(m.group(1), set()).add(fd.get("final_status"))
+    scanned = set(statuses) & expected.keys()  # 판정 기록이 있는 테스트 = 공격 요청을 보낸 테스트
+    result = {"verdicts": dict(Counter(s for v in statuses.values() for s in v)),
+              "score_collected": _score_both(expected, collected, statuses),
+              "score_scanned": _score_both(expected, scanned, statuses)}
+    with open(os.path.join(run_dir, "xss_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    print(f"[SCORE] XSS -> {result}")
+    return result
+
+
 if __name__ == "__main__":
-    rejudge(_resolve_run_dir())
+    run_dir = _resolve_run_dir()
+    rejudge(run_dir)
+    score_xss(run_dir)
